@@ -91,16 +91,20 @@
   #search::-webkit-search-cancel-button { cursor: pointer; }
 
   /* 顶部右侧的次要操作按钮 */
-  .head-actions { margin-left: auto; }
-  #export-btn {
+  .head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  /* 导出和 AI 两个按钮共用一套外观。
+     原来这条只写在 #export-btn 上，v3 加 AI 按钮时没吃到样式，
+     结果按钮塌成一条竖着的窄片（文字被挤到换行）—— 一眼就看得出来是外挂上去的。
+     共用 class 之后，以后再加第三个头部按钮也不会再犯同样的错。 */
+  #export-btn, #ai-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 7px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
-    color: var(--text-sub); background: var(--surface);
+    color: var(--text-sub); background: var(--surface); white-space: nowrap;
     border: 1px solid var(--border); border-radius: var(--radius);
     transition: all .15s;
   }
-  #export-btn:hover { background: #f4f5f7; color: var(--text); }
-  #export-btn svg { width: 14px; height: 14px; }
+  #export-btn:hover, #ai-btn:hover { background: #f4f5f7; color: var(--text); }
+  #export-btn svg, #ai-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
   /* ================= 主体两栏 ================= */
   main { flex: 1; display: flex; min-height: 0; }
@@ -572,6 +576,111 @@
     padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: #fff;
   }
 
+  /* ==========================================================
+     v3 · AI 设置弹窗
+     ========================================================== */
+  .ai-backdrop {
+    position: fixed; inset: 0; z-index: 60;
+    background: rgba(15,20,28,.38);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .ai-dialog {
+    width: 100%; max-width: 600px; max-height: 88vh; overflow-y: auto;
+    background: var(--surface); border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.18);
+    padding: 22px 24px 20px;
+  }
+  .ai-dialog h2 { margin: 0 0 3px; font-size: 16px; font-weight: 600; }
+  .ai-sub { margin: 0 0 18px; font-size: 12.5px; color: var(--text-mute); line-height: 1.7; }
+  .ai-field { margin-bottom: 15px; }
+  .ai-field label {
+    display: block; font-size: 12.5px; font-weight: 500;
+    margin-bottom: 5px; color: var(--text);
+  }
+  .ai-field select, .ai-field input {
+    width: 100%; padding: 7px 10px; font-size: 13px; font-family: inherit;
+    border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  .ai-field input:focus, .ai-field select:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,111,235,.12);
+  }
+  .ai-key-row { display: flex; gap: 8px; align-items: center; }
+  .ai-key-row input { flex: 1; }
+  /* 已存了 key 时的提示条 */
+  .ai-key-state {
+    margin-top: 7px; font-size: 12px; color: var(--text-mute); line-height: 1.65;
+  }
+  .ai-key-state b { color: var(--text-dim, #3c4148); font-weight: 500; }
+  .ai-hint { margin: 6px 0 0; font-size: 11.5px; color: var(--text-mute); line-height: 1.65; }
+  .ai-hint a { color: var(--accent); }
+  /* 服务商/模型下方的说明（含厂商注意事项） */
+  .ai-pv-note {
+    margin: 7px 0 0; font-size: 11.5px; color: var(--text-mute); line-height: 1.7;
+    padding: 8px 10px; background: var(--bg-soft, #f6f7f9); border-radius: 5px;
+  }
+  .ai-pv-note code {
+    font-size: 11px; background: #fff; padding: 1px 4px;
+    border: 1px solid var(--line); border-radius: 3px;
+  }
+  .ai-pending {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+    font-size: 11.5px; color: var(--text-mute); line-height: 1.7;
+  }
+  .ai-foot {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--line);
+  }
+  .ai-foot .ai-foot-msg { font-size: 12px; color: var(--text-mute); flex: 1; }
+  .ai-foot .ai-foot-msg.ok { color: var(--ok, #177245); }
+  .ai-foot .ai-foot-msg.err { color: var(--danger); }
+  /* 顶栏那个 AI 按钮上的状态点。
+     独立成一个 span 撑开自己的位置，而不是跟在文字后面 ——
+     跟在文字后面会因为 inline-flex 的 gap 把它顶得很挤。 */
+  .ai-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    background: var(--text-mute); opacity: .45; margin-left: 2px;
+  }
+  .ai-dot.on { background: #177245; opacity: 1; }
+
+  /* ---- 模型名 + 检测按钮 ----
+     改成上下两行，不要并排。
+     原来输入框和「检测可用模型」挤在同一行，弹窗最大宽 520px，
+     按钮一占位输入框就只剩很窄一截，glm-5.3-flashx 这类长名字直接被截断。
+     模型名是这一栏最需要看全的东西，宁可多占一行也不能截。 */
+  .ai-model-row { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+  .ai-model-row .btn { align-self: flex-start; }
+  .btn.loading::after {
+    content: ''; display: inline-block; width: 9px; height: 9px;
+    margin-left: 6px; vertical-align: -1px;
+    border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; animation: bm-spin .7s linear infinite;
+  }
+  /* 检测结果：可点选的小标签列表 */
+  .ai-detect { margin-top: 9px; }
+  .ai-detect-head {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11.5px; color: var(--text-mute); margin-bottom: 6px;
+  }
+  .ai-detect-toggle {
+    font-size: 11.5px; font-family: inherit; cursor: pointer;
+    color: var(--accent); background: transparent; border: 0; padding: 0;
+  }
+  .ai-detect-toggle:hover { text-decoration: underline; }
+  .ai-detect-list {
+    display: flex; flex-wrap: wrap; gap: 5px;
+    max-height: 132px; overflow-y: auto;
+    padding: 8px; background: var(--bg-soft, #f6f7f9); border-radius: 5px;
+  }
+  .ai-chip {
+    font-size: 11.5px; font-family: ui-monospace, Menlo, Consolas, monospace;
+    padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    background: #fff; border: 1px solid var(--line); color: var(--text-dim, #3c4148);
+  }
+  .ai-chip:hover { border-color: var(--accent); color: var(--accent); }
+  /* 已经填进去的那个，标出来免得在几十个里找不到 */
+  .ai-chip.current { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .ai-detect-err { font-size: 12px; color: var(--danger); line-height: 1.65; }
+
 </style>
 </head>
 <body>
@@ -595,6 +704,15 @@
       <input id="search" type="search" placeholder="搜索标题和正文…">
     </div>
     <div class="head-actions">
+      <!-- v3：AI 设置入口。第 1 步只做到「配置存好」，还问不了。 -->
+      <button id="ai-btn" title="设置 AI 服务商和模型">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l1.9 4.6L18.5 9l-4.6 1.4L12 15l-1.9-4.6L5.5 9l4.6-1.4z"/>
+          <path d="M18 15l.9 2.1 2.1.9-2.1.9L18 21l-.9-2.1-2.1-.9 2.1-.9z"/>
+        </svg>
+        AI<span class="ai-dot" id="ai-dot"></span>
+      </button>
       <!-- 导出备份：数据全在数据库文件里，这是唯一一份能在别处打开的副本 -->
       <button id="export-btn" title="把全部笔记导出成一个 Markdown 文件">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -743,6 +861,62 @@
 <div id="toast" class="hidden">
   <span id="toast-msg"></span>
   <button id="toast-undo">撤销</button>
+</div>
+
+<!-- v3：AI 设置弹窗。默认不渲染内容，打开时才填（避免每次开页面都去请求一次配置） -->
+<div id="ai-backdrop" class="ai-backdrop hidden">
+  <div class="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-dialog-title">
+    <h2 id="ai-dialog-title">AI 设置</h2>
+    <p class="ai-sub">
+      决定「问 AI」时把笔记发给哪一家。密钥只存在这台电脑的
+      <code>data/ai-config.json</code> 里，不会进版本库，也不会写进导出的备份。
+    </p>
+
+    <div class="ai-field">
+      <label for="ai-provider">服务商</label>
+      <select id="ai-provider"></select>
+      <p class="ai-pv-note" id="ai-pv-note"></p>
+    </div>
+
+    <div class="ai-field">
+      <label for="ai-model">模型</label>
+      <div class="ai-model-row">
+        <!-- 模型名做成可自由输入：厂商改名比本程序更新快，
+             拿一份会过期的白名单卡着，只会让新出的模型用不了。 -->
+        <input id="ai-model" list="ai-model-options" placeholder="模型名">
+        <button class="btn" id="ai-detect" type="button" title="问这家服务商要一份当前可用的模型列表">检测模型</button>
+      </div>
+      <datalist id="ai-model-options"></datalist>
+      <p class="ai-hint" id="ai-model-hint"></p>
+      <!-- 检测结果：一个可点选的小列表。点一下就填进上面那个框。 -->
+      <div class="ai-detect hidden" id="ai-detect-box">
+        <div class="ai-detect-head">
+          <span id="ai-detect-summary"></span>
+          <button class="ai-detect-toggle hidden" id="ai-show-all" type="button">显示全部</button>
+        </div>
+        <div class="ai-detect-list" id="ai-detect-list"></div>
+      </div>
+    </div>
+
+    <div class="ai-field">
+      <label for="ai-key">API 密钥</label>
+      <div class="ai-key-row">
+        <input id="ai-key" type="password" autocomplete="off" placeholder="粘贴密钥" spellcheck="false">
+        <button class="btn" id="ai-key-toggle" type="button" title="显示 / 隐藏">显示</button>
+      </div>
+      <p class="ai-key-state" id="ai-key-state"></p>
+      <p class="ai-hint" id="ai-key-hint"></p>
+    </div>
+
+    <div id="ai-pending-box"></div>
+
+    <div class="ai-foot">
+      <span class="ai-foot-msg" id="ai-foot-msg"></span>
+      <button class="btn danger" id="ai-reset">全部清除</button>
+      <button class="btn" id="ai-cancel">取消</button>
+      <button class="btn-primary" id="ai-save">保存</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -2422,10 +2596,244 @@ window.addEventListener('beforeunload', (e) => {
   }
 });
 
+// ============ v3：AI 设置 ============
+// 这一段只做配置，不做调用。问 AI 的功能是下一步的事。
+//
+// 一条重要前提：**浏览器里的任何东西用户都能在控制台里看到**。
+// 所以后端永远不回传完整密钥，这里也就永远拿不到它 —— 只能显示
+// 「已保存 sk-a****7890」这样的打码结果。改密钥只能整份重贴，没有「读取旧值」这回事。
+
+let aiCatalog = null;   // 服务商目录，取一次就缓存
+
+function aiFootMsg(text, kind = '') {
+  const el = $('ai-foot-msg');
+  el.textContent = text;
+  el.className = 'ai-foot-msg' + (kind ? ' ' + kind : '');
+}
+
+// 切换服务商时刷新下半部分：模型建议、说明文字、去哪拿 key。
+// 模型名不跟着服务商一起清空 —— 用户可能刚填了个自定义模型名，
+// 换个服务商看一眼再换回来，名字被冲掉就只能重打了。
+// 探测结果也一起清掉：那是**上一家**的模型，留着会误导。
+function aiOnProviderChange() {
+  const p = aiCatalog?.providers.find(x => x.id === $('ai-provider').value);
+  if (!p) return;
+
+  // 建议模型做成 datalist（下拉建议），但输入框仍然可以自由填
+  $('ai-model-options').innerHTML = p.models
+    .map(m => `<option value="${esc(m.id)}">${esc(m.note || m.id)}</option>`).join('');
+  $('ai-model-hint').textContent = p.modelHint
+    || (p.models.length ? '可以直接选下面的，也可以手填别的名字。' : '');
+
+  aiClearDetected();
+
+  const bits = [];
+  if (p.note) bits.push(p.note);
+  if (p.retired) bits.push('注意：' + p.retired);
+  bits.push(`接口地址 <code>${esc(p.base_url)}</code>`);
+  $('ai-pv-note').innerHTML = bits.join('<br>');
+  $('ai-key-hint').innerHTML = `没有密钥？去 <a href="${esc(p.key_url)}" target="_blank" rel="noopener noreferrer">${esc(p.name)}控制台</a> 申请。`;
+}
+
+// ---- 检测可用模型 ----
+// 为什么要这个按钮：厂商改模型名太频繁（DeepSeek 2026-09-10 刚把
+// deepseek-v4-flash 改成 deepseek-flash）。目录里写死一份名单必然会有过时的一天，
+// 与其维护它，不如直接问服务商要一份现在的。
+// 它不花钱（只列名字，不对话）、不带笔记内容，密钥也不落盘。
+let aiDetected = { models: [], all: [], showAll: false };
+
+function aiClearDetected() {
+  aiDetected = { models: [], all: [], showAll: false };
+  $('ai-detect-box').classList.add('hidden');
+  $('ai-detect-list').innerHTML = '';
+}
+
+// 把检测结果画成一堆可点的标签。当前填着的那个高亮，方便在一堆里认出来。
+function aiRenderDetected() {
+  const box = $('ai-detect-box');
+  const list = aiDetected.showAll ? aiDetected.all : aiDetected.models;
+  const cur = $('ai-model').value.trim();
+
+  $('ai-detect-list').innerHTML = list.length
+    ? list.map(m => `<button type="button" class="ai-chip${m === cur ? ' current' : ''}" data-m="${esc(m)}">${esc(m)}</button>`).join('')
+    : '';
+  // 一条都没有就整个藏起来：空盒子看着像出错了
+  box.classList.toggle('hidden', !list.length);
+  $('ai-show-all').classList.toggle('hidden', !aiDetected.all.length || aiDetected.all.length === aiDetected.models.length);
+}
+
+async function aiDetectModels() {
+  const btn = $('ai-detect');
+  const box = $('ai-detect-box');
+  btn.classList.add('loading');
+  aiClearDetected();
+
+  try {
+    // 密钥取输入框里的；留空就用后端已保存的那个。
+    // 探测**不会保存**这次输入的密钥 —— 试一下不等于存下来。
+    const body = { provider: $('ai-provider').value };
+    const typed = $('ai-key').value.trim();
+    if (typed) body.api_key = typed;
+
+    const r = await api('/api/ai/models', { method: 'POST', body: JSON.stringify(body) });
+
+    if (!r.ok) {
+      box.classList.remove('hidden');
+      $('ai-detect-list').innerHTML = `<p class="ai-detect-err">${esc(r.error || '检测失败')}</p>`;
+      $('ai-detect-summary').textContent = '';
+      return;
+    }
+    aiDetected = { models: r.models || [], all: r.all_models || r.models || [], showAll: false };
+    $('ai-detect-summary').textContent =
+      `找到 ${r.total} 个模型${r.filtered ? `，其中 ${r.filtered} 个不像是对话用的，先藏起来了` : ''}：`;
+    aiRenderDetected();
+
+    // 一个都没探测出来才算失败；有结果就直接把第一个填上，省一次手点。
+    // 但只在**输入框还是空的**时候才自动填 —— 不覆盖用户已经敲进去的东西。
+    if (aiDetected.models.length && !$('ai-model').value.trim()) {
+      $('ai-model').value = aiDetected.models[0];
+      aiRenderDetected();
+    }
+  } catch (e) {
+    box.classList.remove('hidden');
+    $('ai-detect-list').innerHTML = `<p class="ai-detect-err">${esc(e.message)}</p>`;
+  } finally {
+    btn.classList.remove('loading');
+  }
+}
+
+$('ai-detect').addEventListener('click', aiDetectModels);
+$('ai-show-all').addEventListener('click', () => { aiDetected.showAll = true; aiRenderDetected(); });
+$('ai-detect-list').addEventListener('click', (e) => {
+  const chip = e.target.closest('.ai-chip');
+  if (!chip) return;
+  $('ai-model').value = chip.dataset.m;
+  aiRenderDetected();
+});
+// 手改输入框时，同步一下哪个标签是高亮的
+$('ai-model').addEventListener('input', () => {
+  if (!$('ai-detect-box').classList.contains('hidden')) aiRenderDetected();
+});
+
+async function openAiDialog() {
+  $('ai-backdrop').classList.remove('hidden');
+  $('ai-key').value = '';                 // 每次打开都是空的，不回填旧密钥
+  aiFootMsg('');
+  try {
+    const data = await api('/api/ai/config');
+    aiCatalog = data;
+    const cfg = data.config;
+
+    $('ai-provider').innerHTML = data.providers
+      .map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    $('ai-provider').value = cfg.provider || data.providers[0].id;
+    $('ai-model').value = cfg.model || '';
+    aiOnProviderChange();
+
+    // 已存了 key 就明确说清楚，别让人以为没保存上而白贴一次
+    $('ai-key-state').innerHTML = cfg.has_key
+      ? `已保存密钥 <b>${esc(cfg.key_preview)}</b>。留空这一栏就是不改它。`
+      : '还没保存过密钥。';
+
+    $('ai-pending-box').innerHTML = data.pending.length
+      ? `<div class="ai-pending">暂时用不了：${data.pending
+          .map(p => `<b>${esc(p.name)}</b> — ${esc(p.why)}`).join('；')}。</div>`
+      : '';
+
+    updateAiDot(cfg);
+    $('ai-save').focus();
+  } catch (e) {
+    aiFootMsg('读不到配置：' + e.message, 'err');
+  }
+}
+
+function closeAiDialog() {
+  $('ai-backdrop').classList.add('hidden');
+  $('ai-key').value = '';      // 关掉就把输入框里那个明文清掉，不留在 DOM 里
+  aiClearDetected();
+  aiFootMsg('');
+}
+
+// 顶栏按钮上的小圆点：绿点 = 配置齐了，可以问。
+// 没配就灰着，让「为什么还不能用」一眼看得见。
+function updateAiDot(cfg) {
+  const d = $('ai-dot');
+  if (!d) return;
+  d.classList.toggle('on', !!(cfg && cfg.ready));
+  $('ai-btn').title = cfg && cfg.ready
+    ? `AI 已就绪：${cfg.provider} · ${cfg.model}`
+    : '设置 AI 服务商和模型（还没配好）';
+}
+
+$('ai-btn').addEventListener('click', openAiDialog);
+$('ai-cancel').addEventListener('click', closeAiDialog);
+// 点背景空白处关闭（点到弹窗本体不关，不然选文字时会误关）
+$('ai-backdrop').addEventListener('mousedown', (e) => {
+  if (e.target === $('ai-backdrop')) closeAiDialog();
+});
+
+$('ai-provider').addEventListener('change', aiOnProviderChange);
+
+$('ai-key-toggle').addEventListener('click', () => {
+  const inp = $('ai-key');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  $('ai-key-toggle').textContent = show ? '隐藏' : '显示';
+});
+
+$('ai-save').addEventListener('click', async () => {
+  const provider = $('ai-provider').value;
+  const model = $('ai-model').value.trim();
+  const key = $('ai-key').value.trim();
+
+  // 这两条在提交前就拦掉，省得发一次请求再回来报同样的错
+  if (!model) return aiFootMsg('模型名不能空', 'err');
+  if (!key && !$('ai-key-state').textContent.includes('已保存')) {
+    return aiFootMsg('还没填密钥。第一次用要先填', 'err');
+  }
+  aiFootMsg('保存中…');
+  try {
+    // key 只在用户真的输入了新值时才带上。不带 = 保留后端原来那个。
+    const body = { provider, model };
+    if (key) body.api_key = key;
+    const r = await api('/api/ai/config', { method: 'PUT', body: JSON.stringify(body) });
+    updateAiDot(r.config);
+    aiFootMsg('已保存', 'ok');
+    setTimeout(closeAiDialog, 450);
+  } catch (e) {
+    aiFootMsg(e.message, 'err');
+  }
+});
+
+// 「全部清除」要防手滑 —— 一次点击就把密钥和服务商都清掉，代价不小
+let aiResetArmed = false;
+$('ai-reset').addEventListener('click', async () => {
+  if (!aiResetArmed) {
+    aiResetArmed = true;
+    aiFootMsg('再点一次就真的清掉了（密钥会从磁盘上删掉）', 'err');
+    setTimeout(() => { aiResetArmed = false; }, 4000);
+    return;
+  }
+  try {
+    const r = await api('/api/ai/config', { method: 'PUT', body: JSON.stringify({ reset: true }) });
+    updateAiDot(r.config);
+    closeAiDialog();
+  } catch (e) {
+    aiFootMsg(e.message, 'err');
+  }
+});
+
+// Esc 优先关弹窗：它是当前最上层的东西
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('ai-backdrop').classList.contains('hidden')) closeAiDialog();
+}, true);   // capture：要在页面自己那个 Esc 处理之前跑
+
 // ============ 启动 ============
 setMode(mode);
 renderHints();
 reloadCurrentView();
+// 静默读一次配置，只为顶栏那个小圆点。读不到就算了，不打扰用户。
+api('/api/ai/config').then(d => { aiCatalog = d; updateAiDot(d.config); }).catch(() => {});
 </script>
 </body>
 </html>

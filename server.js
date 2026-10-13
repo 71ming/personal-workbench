@@ -429,6 +429,302 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
+// ============ v3：AI 服务商配置 ============
+// 这一步只做「配置存哪、怎么读、怎么写」，不做真正的调用（那是下一步）。
+//
+// —— 为什么配置放文件而不是放进 SQLite ——
+// 1) .gitignore 已经整条忽略 data/，API key 天然不会跟着代码进版本库；
+// 2) 这份文件里只有服务商、模型、key 三样东西，跟「笔记 / 任务 / 收藏」这些
+//    真正的数据完全不是一回事。塞进数据库就要跟着备份导出走，
+//    而 key 绝对不该出现在你可能发给别人看的备份文件里。
+//
+// —— 为什么 key 只在服务端，永不回传给前端 ——
+// 前端是浏览器里的 JavaScript，页面上的一切用户都能在控制台里看到。
+// 只要把完整 key 发回页面，它就等于公开了。所以接口只回传
+// 「有没有存 key」和一段打码的提示（sk-a****xyz），永远不回传原文。
+
+const AI_CONFIG_PATH = path.join(ROOT, 'data', 'ai-config.json');
+
+// 服务商目录。**这份清单是「查证过的快照」，不是永久正确的。**
+// 查证日期：2026-10。厂商改模型名很频繁 —— DeepSeek 就在 2026-09-10 把
+// deepseek-v4-flash 换成了 deepseek-flash，2026-07-24 停用了 deepseek-chat。
+// 所以模型名做成「建议值」而不是写死的默认值，用户可以填目录里没有的任何名字。
+const AI_PROVIDERS = [
+  {
+    id: 'deepseek', name: 'DeepSeek', protocol: 'openai',
+    base_url: 'https://api.deepseek.com',
+    key_url: 'https://platform.deepseek.com',
+    // 便宜的 flash 档就够「回答我的笔记里写了什么」这种活，不需要 pro
+    models: [
+      { id: 'deepseek-flash', note: '便宜、够用。2026-09-10 起用这个名字（V4.1）' },
+      { id: 'deepseek-v4-pro', note: '更强，也更贵' },
+    ],
+    retired: 'deepseek-chat / deepseek-reasoner 已于 2026-07-24 停用',
+    note: '国内直连不用代理。有峰谷定价，闲时价格减半。',
+  },
+  {
+    id: 'doubao', name: '豆包（火山方舟）', protocol: 'openai',
+    base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+    key_url: 'https://console.volcengine.com/ark',
+    // 豆包的「模型名」其实是方舟控制台里的推理接入点 id（ep- 开头），
+    // 每个人不一样，没法预设默认值，只能让用户自己去控制台抄。
+    models: [],
+    modelHint: '填火山方舟控制台里的「接入点 ID」（ep- 开头）',
+    note: '国内最便宜的一档，实测适合「读笔记答问」这种短问答。',
+  },
+  {
+    id: 'qwen', name: '通义千问（阿里云百炼）', protocol: 'openai',
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    key_url: 'https://bailian.console.aliyun.com',
+    models: [
+      { id: 'qwen3.8-flash', note: '便宜，上下文 100 万' },
+      { id: 'qwen3.7-plus', note: '均衡' },
+      { id: 'qwen3.8-max', note: '最强，也最贵' },
+    ],
+    note: '新账号通常有免费额度，可以先拿它试。',
+  },
+  {
+    id: 'kimi', name: 'Kimi（月之暗面）', protocol: 'openai',
+    base_url: 'https://api.moonshot.cn/v1',
+    key_url: 'https://platform.moonshot.cn',
+    models: [
+      { id: 'kimi-k3', note: '当前主力' },
+      { id: 'kimi-k2.6', note: '上一代，长上下文' },
+    ],
+    note: '长文档处理见长。',
+  },
+  {
+    id: 'glm', name: '智谱 GLM', protocol: 'openai',
+    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    key_url: 'https://open.bigmodel.cn',
+    models: [
+      { id: 'glm-5.2', note: '' },
+    ],
+    modelHint: '模型名更新较频繁，不确定就填控制台里列出的最新一个',
+    note: '有免费额度的新用户活动。',
+  },
+  {
+    id: 'openai', name: 'OpenAI', protocol: 'openai',
+    base_url: 'https://api.openai.com/v1',
+    key_url: 'https://platform.openai.com',
+    models: [
+      { id: 'gpt-6-astra', note: '通用' },
+      { id: 'gpt-6-sol', note: '偏推理' },
+    ],
+    retired: 'gpt-4o / o3 / o4-mini 官方标注已不推荐',
+    note: '国内直连需要代理，本工作台不内置代理功能（见方案.md）。',
+  },
+];
+
+// Claude 单独列出来但**不接**：它用的是 Anthropic Messages 协议，
+// 请求体结构跟 OpenAI 那套不一样（system 是顶层字段、max_tokens 必填、
+// 鉴权头是 x-api-key 不是 Authorization）。留到 v3.1 单独写，
+// 宁可少一个选项，也不要一个看起来能选、一调就报错的选项。
+const AI_PENDING = [
+  { id: 'claude', name: 'Claude', why: '协议不同，需要单独写一套调用（v3.1 再做）' },
+];
+
+// 打码：只露头 3 个字符和尾 4 个，中间固定几个点。
+// 定这个规矩是因为不少 key 是「sk-」开头，头部露出来够你确认存的是哪一家的，
+// 又不至于让人看着像在显示完整 key。
+function maskKey(key) {
+  const k = String(key || '');
+  if (k.length <= 8) return '********';   // 太短的直接全盖
+  return k.slice(0, 3) + '****' + k.slice(-4);
+}
+
+// 读配置。文件不存在是**正常状态**（还没设置过），不是错误。
+function readAiConfig() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AI_CONFIG_PATH, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};   // 不存在 / 坏了 / 手改坏了，都当「没设置」，不该让工作台起不来
+  }
+}
+
+// 写配置。先写临时文件再改名 —— 直接覆盖的话，中途断电会留下半截 JSON，
+// 下次启动就配置全没了（本地小工具最常见的翻车方式）。
+function writeAiConfig(cfg) {
+  fs.mkdirSync(path.dirname(AI_CONFIG_PATH), { recursive: true });
+  const tmp = AI_CONFIG_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.renameSync(tmp, AI_CONFIG_PATH);
+  try { fs.chmodSync(AI_CONFIG_PATH, 0o600); } catch { /* Windows 上不支持就算了 */ }
+}
+
+// 找一个服务商。找不到返回 null —— 调用方要靠它拒绝掉瞎填的 provider id。
+function findProvider(id) {
+  return AI_PROVIDERS.find(p => p.id === id) || null;
+}
+
+// 给前端看的配置：**没有 key 原文**，只有「有没有」和打码提示。
+function aiConfigPublic() {
+  const cfg = readAiConfig();
+  const p = findProvider(cfg.provider);
+  return {
+    provider: cfg.provider || '',
+    model: cfg.model || '',
+    has_key: !!cfg.apiKey,
+    key_preview: cfg.apiKey ? maskKey(cfg.apiKey) : '',
+    // 下面这个是给「能不能问」用的判断依据，前端拿它决定要不要先引导去设置
+    ready: !!(p && cfg.apiKey && cfg.model),
+    updated_at: cfg.updatedAt || '',
+  };
+}
+
+function handleAiGetConfig(res) {
+  return send(res, 200, {
+    providers: AI_PROVIDERS,
+    pending: AI_PENDING,
+    config: aiConfigPublic(),
+  });
+}
+
+async function handleAiPutConfig(req, res) {
+  const body = await readBody(req);
+
+  // provider 必须是目录里的一个。不认的 id 直接拒 —— 否则调用器会拿着
+  // 一个用户瞎填的 base_url 去发请求，那既是安全问题也是用户自己的问题。
+  const provider = String(body.provider ?? '').trim();
+  if (provider && !findProvider(provider)) {
+    return send(res, 400, { error: '不认识的服务商：' + provider });
+  }
+
+  // 模型名不校验「对不对」，只校验「填没填」。理由同上：厂商改名比本程序更新快，
+  // 拿一份可能过期的白名单去卡用户，只会让正确的新模型名用不了。
+  const model = String(body.model ?? '').trim();
+  if (model.length > 120) return send(res, 400, { error: '模型名太长了' });
+
+  // reset 是显式的「全部清空」开关。
+  // 为什么需要它：下面两行是 `if (provider)`，空字符串会被当成「没传」跳过，
+  // 所以光靠传空串永远清不掉服务商和模型，末尾那段「三项都空就删文件」也就成了走不到的死代码。
+  // 用一个显式字段表达「我真的要清空」，不靠猜。
+  if (body.reset === true) {
+    try { fs.unlinkSync(AI_CONFIG_PATH); } catch { /* 本来就没有，忽略 */ }
+    return send(res, 200, { config: aiConfigPublic() });
+  }
+
+  const cfg = readAiConfig();
+
+  // key 三种情况，用一个显式字段区分，不靠猜：
+  //   不传 api_key    → 保留原来的（前端只在用户真的输入了新 key 时才带这个字段）
+  //   传 clear_key    → 清空
+  //   传 api_key 文本 → 换新的
+  if (body.clear_key === true) {
+    delete cfg.apiKey;
+  } else if (typeof body.api_key === 'string' && body.api_key.trim() !== '') {
+    cfg.apiKey = body.api_key.trim();
+  }
+
+  if (provider) cfg.provider = provider;
+  if (model) cfg.model = model;
+
+  // 现在仍然清不空（比如只发了 clear_key），但留着这个判断作为兜底：
+  // 万一以后加了别的清空路径，这里保证不会留一份空壳文件在磁盘上。
+  if (!cfg.provider && !cfg.model && !cfg.apiKey) {
+    try { fs.unlinkSync(AI_CONFIG_PATH); } catch { /* 本来就没有，忽略 */ }
+  } else {
+    cfg.updatedAt = new Date().toLocaleString('zh-CN');
+    writeAiConfig(cfg);
+  }
+
+  return send(res, 200, { config: aiConfigPublic() });
+}
+
+// ============ v3：列出服务商当前可用的模型 ============
+// 为什么要「探测」而不是在目录里写死模型名：
+// 厂商改模型名太频繁 —— DeepSeek 2026-09-10 才把 deepseek-v4-flash 换成
+// deepseek-flash，2026-07-24 停用了 deepseek-chat。只要目录里的名字落后一步，
+// 用户就会撞上「我明明买了这个模型，工作台却不认」。
+// 各家都有 GET {base_url}/models（OpenAI 兼容协议的一部分），直接问它最准。
+//
+// 这条接口**不做聊天**，只列名字：不产生 token 花费，也不用等模型生成。
+const AI_PROBE_TIMEOUT = 12000;
+
+// 从返回的模型列表里剔掉明显不是用来对话的。
+// 但这些关键词不准确（判断错了就是把能用的模型藏起来了），所以前端
+// 同时提供一个「显示全部」开关 —— 宁可多列出来让人自己挑，也别静默吞掉。
+const NON_CHAT_HINTS = /embedding|embed|rerank|whisper|tts|speech|moderation|dall-?e|stable-diffusion|(^|[-_/])clip($|[-_/])|ocr|asr|transcribe|image|video|audio/i;
+
+async function handleAiModels(req, res) {
+  const body = await readBody(req);
+
+  // base_url 只从目录里取，绝不从请求里读 —— 否则这个接口就成了
+  // 「让本机去访问任意地址」的跳板（粘贴抓取功能已经踩过这个坑，见 isPrivateHost）。
+  const p = findProvider(String(body.provider ?? '').trim());
+  if (!p) return send(res, 400, { error: '不认识的服务商' });
+
+  // 密钥：优先用这次请求里带来的（用户刚贴上还没保存的），
+  // 没有就用已保存的。**这条路径不写盘** —— 探测不等于保存，
+  // 用户可能只是试一下，不打算留下密钥。
+  const key = String(body.api_key ?? '').trim() || (readAiConfig().apiKey || '');
+  if (!key) return send(res, 200, { ok: false, error: '还没有密钥，先填一个再检测' });
+
+  let resp;
+  try {
+    resp = await fetch(p.base_url.replace(/\/+$/, '') + '/models', {
+      signal: AbortSignal.timeout(AI_PROBE_TIMEOUT),
+      headers: { 'authorization': `Bearer ${key}`, accept: 'application/json' },
+    });
+  } catch (e) {
+    const timeout = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    // 连不上要说清是「网络/被拦」还是「超时」，不然用户会去查 key 白查半天
+    return send(res, 200, {
+      ok: false,
+      error: timeout
+        ? `连 ${p.name} 超时（${AI_PROBE_TIMEOUT / 1000} 秒没响应）`
+        : `连不上 ${p.name}：${e.message || '网络错误'}`,
+    });
+  }
+
+  if (!resp.ok) {
+    // 把对方给的错误原文尽量带出来。401/403 单独说，因为那几乎总是 key 错了，
+    // 而不是「模型名不对」—— 两件事的排查方向完全不同。
+    let detail = '';
+    try {
+      const j = await resp.json();
+      detail = j?.error?.message || j?.message || '';
+    } catch { /* 不是 JSON 就算了 */ }
+    const hint = (resp.status === 401 || resp.status === 403)
+      ? '密钥可能填错了，或者没激活'
+      : (resp.status === 404 ? '这家可能不支持列出模型' : '');
+    return send(res, 200, { ok: false, error: `${p.name} 返回 ${resp.status}${hint ? '（' + hint + '）' : ''}${detail ? '：' + detail : ''}` });
+  }
+
+  let list;
+  try {
+    const j = await resp.json();
+    list = Array.isArray(j?.data) ? j.data : (Array.isArray(j?.models) ? j.models : null);
+  } catch { list = null; }
+
+  if (!list) {
+    // 返回格式不认识。不报错，但要老实说「我不知道列出来的是什么」，
+    // 免得前端显示一个空下拉框，用户以为是「这家没有模型可用」。
+    return send(res, 200, { ok: false, error: `${p.name} 返回的格式看不懂，没法自动列出模型`, raw: true });
+  }
+
+  const all = list
+    .map(m => (typeof m === 'string' ? m : (m?.id || m?.name || '')))
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i)      // 去重（有些家会重复列）
+    .sort();
+  const chat = all.filter(m => !NON_CHAT_HINTS.test(m));
+
+  // 一条都没有的话，宁可把原始列表交出去（total 全量 + filtered 空）
+  // 也不要显示「没有可用模型」—— 那会让用户以为自己买错了。
+  return send(res, 200, {
+    ok: true,
+    provider: p.id,
+    total: all.length,
+    models: chat.length ? chat : all,
+    // 这个标记告诉前端「过滤掉了一些，可能是误伤」，好让它显示「显示全部」开关
+    filtered: chat.length > 0 ? all.length - chat.length : 0,
+    hidden: all.length - (chat.length ? chat.length : all.length),
+    all_models: all,
+  });
+}
+
 // ---------- 导出：把全部笔记拼成一个 Markdown 文件 ----------
 // 为什么用 Markdown 而不是自定义格式：任何编辑器、记事本、Git 都能直接看，
 // 以后想迁到别的工具也读得懂。这是你唯一一份「不在数据库里」的副本。
@@ -549,6 +845,21 @@ async function api(req, res, url) {
   // 统一搜索：笔记 + 任务一起搜
   if (req.method === 'GET' && url.pathname === '/api/search') {
     return handleSearch(res, url.searchParams.get('q') || '');
+  }
+
+  // ============ AI 配置（v3）===========
+  // 注意这里只有「配置」接口，没有「调用」接口。
+  // 调用要发真实网络请求、要花钱、会带上笔记内容，那是下一步单独做、单独测的事。
+  if (req.method === 'GET' && url.pathname === '/api/ai/config') {
+    return handleAiGetConfig(res);
+  }
+  if (req.method === 'PUT' && url.pathname === '/api/ai/config') {
+    return await handleAiPutConfig(req, res);
+  }
+
+  // 列出这家服务商当前可用的模型（要密钥，不花钱，不产生对话内容）
+  if (req.method === 'POST' && url.pathname === '/api/ai/models') {
+    return await handleAiModels(req, res);
   }
 
   // 笔记列表 / 搜索
