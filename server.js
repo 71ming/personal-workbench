@@ -928,6 +928,137 @@ async function handleAiTest(req, res) {
   return send(res, 200, { ...r, mismatch, config: aiConfigPublic() });
 }
 
+// ============ v3：问 AI（把勾选的笔记交给模型回答）===========
+// 这一步要守的四条（每一条都是「用户凭什么敢点这个按钮」）：
+//   1. 只发**用户勾选**的笔记，一条没勾就什么都不发；
+//   2. 只有主动点「问 AI」才发，保存笔记、打开笔记都不发；
+//   3. 要求模型用 [笔记N] 标出处，我们据此生成可点回原笔记的引用；
+//   4. 明确告诉模型「笔记里没有的，就说没有」，杜绝它靠通用知识编答案。
+//
+// 为什么引用要靠模型自己标，而不是我们事后猜：
+// 事后比对「答案里的句子像不像某条笔记」是猜的，会出现张冠李戴 —
+// 看着有引用，其实引错了地方，那比没有引用更糟（用户会信错的那条）。
+// 让模型在生成时就标，标错也是它的责任，而它的责任我们看得见。
+
+const AI_MAX_NOTES = 30;         // 一次最多带多少条笔记
+const AI_MAX_NOTE_CHARS = 4000;  // 每条笔记最多带多少字
+
+// 把勾选的笔记拼成一段带编号的正文。
+// 编号（[笔记1]）同时用于两件事：给模型引用用，以及后面把引用换回链接用。
+function buildNoteContext(notes) {
+  const parts = [];
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    let body = String(n.body || '').trim();
+    if (body.length > AI_MAX_NOTE_CHARS) {
+      body = body.slice(0, AI_MAX_NOTE_CHARS) + '\n…（这条太长了，后面的没给）';
+    }
+    parts.push(`[笔记${i + 1}] 标题：${String(n.title || '无标题')}\n${body}`);
+  }
+  return parts.join('\n\n---\n\n');
+}
+
+// 提示词。写法上的两个要点：
+// - 规则放在最前面、说得极其具体，因为小模型对「请基于以下内容」的遵守度
+//   远不如对「你要严格做到以下 4 条」的遵守度；
+// - 明确允许它说「没提」，并且说明这是**正确行为而不是失败** ——
+//   不然模型会倾向于给一个泛泛的通用答案（这正是我们要防的事）。
+function aiSystemPrompt(noteCount) {
+  return [
+    `你在帮用户查阅他自己的笔记。你只能依据下面提供的 ${noteCount} 条笔记回答。`,
+    ``,
+    `必须严格做到这 4 点：`,
+    `1. 每说完一个来自笔记的内容，就在后面用 [笔记N] 标出它来自哪一条。N 是下面笔记的编号。`,
+    `2. 如果 ${noteCount} 条笔记里根本没有相关信息，就直接说「这些笔记里没有提到」，然后停下。`,
+    `   绝对不要用你自己的知识来补充，也不要根据常识推测。`,
+    `3. 如果笔记里的说法互相矛盾，把矛盾如实列出来，不要替用户判断哪个对。`,
+    `4. 用中文回答，尽量简洁，不要复述整个笔记内容，只答问题相关的部分。`,
+    ``,
+    `特别提醒：说「没有提到」是**正确且被鼓励**的行为。`,
+    `编一个听起来合理的答案才是错误。如果你觉得该说的笔记里真没有，就这么答。`,
+  ].join('\n');
+}
+
+// 从模型回答里把 [笔记3] 这类标记抠出来，换成能点回原笔记的引用。
+// 返回 { text, cited: [笔记id...] }。
+//
+// 注意「引用了但我没发这条」的情况：那说明模型在编。
+// 这种情况**保留原样并记下来**，但不生成链接 —— 显示层会提示「模型引用了不存在的笔记」。
+function parseCitations(answer, notes) {
+  const used = new Set();
+  let bad = 0;
+  // 捕获组**只圈数字**：[笔记1] → num = '1'。
+  // （第一版写成 \[(笔记\s*\d+)\]，把「笔记」两个字也圈进去了，
+  //  于是 Number('笔记1') = NaN，notes[NaN-1] 是 undefined，
+  //  每一条引用都被误判成「模型引用了不存在的笔记」。）
+  const text = String(answer).replace(/\[笔记\s*(\d+)\]/g, (m, num) => {
+    const idx = Number(num);
+    const note = notes[idx - 1];
+    if (!note) { bad++; return m; }
+    used.add(idx);
+    // 换成内部标记，前端再渲染成可点回原笔记的按钮
+    return `CITE${idx}`;
+  });
+  return { text, cited: [...used], bad };
+}
+
+// 供前端调用的问答接口。
+async function handleAiAsk(req, res) {
+  const { question = '', note_ids = [] } = await readBody(req);
+  // 局部变量别叫 q：文件里 q 是笔记的查询对象（q.get / q.list）。
+  // 这里原本写成 `const q = String(question).trim()`，把它整个遮住了，
+  // 下面 q.get.get(id) 直接抛 "Cannot read properties of undefined"。
+  const questionText = String(question).trim();
+
+  if (!questionText) return send(res, 400, { error: '问题不能空' });
+  if (questionText.length > 500) return send(res, 400, { error: '问题太长了' });
+  if (!Array.isArray(note_ids) || !note_ids.length) {
+    // 这条要专门强调：**一条笔记都不勾，是不发送任何东西**
+    return send(res, 400, { error: '一条笔记都没勾。不会勾就不该发出去 —— 请先勾选想让它看的笔记。' });
+  }
+
+  const ids = note_ids.map(Number).filter(Number.isInteger).slice(0, AI_MAX_NOTES);
+
+  // 只读勾选的那些。q.get 是按 id 取，且这里已经过滤过 deleted_at。
+  const notes = [];
+  for (const id of ids) {
+    const n = q.get.get(id);
+    if (n && !n.deleted_at) notes.push({ id: n.id, title: n.title, body: n.body });
+  }
+  if (!notes.length) return send(res, 400, { error: '勾选的笔记都找不到了' });
+
+  const t0 = Date.now();
+  const r = await callModel(
+    readAiConfig().provider,
+    readAiConfig().model,
+    aiSystemPrompt(notes.length),
+    `以下是我的笔记：\n\n${buildNoteContext(notes)}\n\n---\n\n我的问题：${questionText}`,
+  );
+  const ms = Date.now() - t0;
+
+  if (!r.ok) {
+    return send(res, 200, { ...r, sent_notes: notes.length, ms });
+  }
+
+  const { text, cited, bad } = parseCitations(r.content, notes);
+
+  return send(res, 200, {
+    ok: true,
+    question: questionText,
+    answer: text,
+    // 引用存的是笔记 id，前端拿它渲染成「打开这条笔记」
+    cited: cited.map(i => ({ index: i, id: notes[i - 1].id, title: notes[i - 1].title })),
+    // 模型引用了不存在的编号 = 它在编。必须告诉用户。
+    bad_citations: bad,
+    sent_notes: notes.map(n => ({ id: n.id, title: n.title })),
+    usage: r.usage,
+    cost: r.cost,
+    returned_model: r.returned_model,
+    finish_reason: r.finish_reason,
+    ms,
+  });
+}
+
 // ---------- 导出：把全部笔记拼成一个 Markdown 文件 ----------
 // 为什么用 Markdown 而不是自定义格式：任何编辑器、记事本、Git 都能直接看，
 // 以后想迁到别的工具也读得懂。这是你唯一一份「不在数据库里」的副本。
@@ -1068,6 +1199,11 @@ async function api(req, res, url) {
   // 测试连通性：发一句最短的话，不带任何笔记内容
   if (req.method === 'POST' && url.pathname === '/api/ai/test') {
     return await handleAiTest(req, res);
+  }
+
+  // 问 AI：只发用户勾选的笔记
+  if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
+    return await handleAiAsk(req, res);
   }
 
   // 笔记列表 / 搜索
