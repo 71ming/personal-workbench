@@ -480,10 +480,18 @@ function buildMarkdown() {
   if (marks.length) {
     lines.push(`# 收藏`, ``);
     for (const b of marks) {
-      // 标题为空是合法的（新建后没打字，或者从别处导入的脏数据）。
-      // 这里必须兜住：`- [](url)` 是坏掉的 Markdown，导出文件里等于这条收藏没了。
-      // 先试着用链接推一个，推不出就把链接本身当标题 —— 至少是合法链接，点得开。
-      const title = String(b.title || '').trim() || titleFromUrl(b.url) || b.url;
+      // 标题这一格显示什么。
+      //
+      // 先说清楚一件事：**链接本身永远不截断**，截了就点不开了，那一行长就长着。
+      // 真正的噪音是标题那一格 —— 建收藏时标题留空，后端会拿链接本身当标题兜底（见 POST /api/bookmarks），
+      // 于是导出来变成 `- [<189 字的网址>](<189 字的网址>)`，一屏放不下半行。
+      //
+      // 所以这里复用 isAutoTitle()：标题是「我们自己按链接拼出来的」就用推导标题顶上，
+      // 用户自己起的一个字都不动。这跟抓取时替换标题用的是同一把尺子，行为一致。
+      const rawTitle = String(b.title || '').trim();
+      const title = (!rawTitle || isAutoTitle(rawTitle, b.url))
+        ? (titleFromUrl(b.url) || b.url)
+        : rawTitle;
       lines.push(`- [${title.replace(/\s*\n\s*/g, ' ')}](${b.url})`);
       if (b.summary) lines.push(`  > ${b.summary.replace(/\s*\n\s*/g, ' ')}`);
       // 抓取状态也写进备份。**抓成功的不写** —— 那是默认状态，每条都写一遍全是噪音。
