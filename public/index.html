@@ -271,6 +271,65 @@
     font-size: 15.5px; line-height: 1.85; font-family: inherit; color: var(--text);
   }
   #body::placeholder { color: #c4c9cf; }
+
+  /* ---------- 编辑 / 分栏 / 预览 三种视图 ---------- */
+  .mode-switch {
+    display: inline-flex; padding: 2px; margin-right: 10px;
+    background: #f1f2f4; border-radius: 8px;
+  }
+  .mode-switch button {
+    padding: 4px 11px; font-size: 12.5px; font-family: inherit; cursor: pointer;
+    color: var(--text-sub); background: transparent; border: 0; border-radius: 6px;
+    transition: all .15s;
+  }
+  .mode-switch button:hover { color: var(--text); }
+  .mode-switch button.on { background: var(--surface); color: var(--accent); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+
+  .panes { display: flex; gap: 36px; }
+  .pane { flex: 1; min-width: 0; }
+  #edit-pane.mode-edit .pane-view { display: none; }
+  #edit-pane.mode-preview .pane-edit { display: none; }
+  #edit-pane.mode-edit #body { min-height: 100%; }
+  #edit-pane.mode-preview .markdown { min-height: 420px; }
+  /* 分栏要放得下两列，把正文区放宽 */
+  #edit-pane.mode-split .doc { max-width: 1120px; }
+  #edit-pane.mode-split .pane-view {
+    border-left: 1px solid var(--border-soft); padding-left: 36px;
+  }
+
+  /* ---------- Markdown 渲染出来的样式 ---------- */
+  .markdown { font-size: 15.5px; line-height: 1.85; color: var(--text); word-wrap: break-word; }
+  .markdown > *:first-child { margin-top: 0; }
+  .markdown p { margin: 0 0 1em; }
+  .markdown h1, .markdown h2, .markdown h3,
+  .markdown h4, .markdown h5, .markdown h6 {
+    margin: 1.6em 0 .6em; line-height: 1.35; font-weight: 700;
+  }
+  .markdown h1 { font-size: 1.7em; }
+  .markdown h2 { font-size: 1.42em; padding-bottom: .3em; border-bottom: 1px solid var(--border-soft); }
+  .markdown h3 { font-size: 1.2em; }
+  .markdown h4, .markdown h5, .markdown h6 { font-size: 1em; color: var(--text-sub); }
+  .markdown ul, .markdown ol { margin: 0 0 1em; padding-left: 1.5em; }
+  .markdown li { margin: .25em 0; }
+  .markdown blockquote {
+    margin: 0 0 1em; padding: .4em 0 .4em 1em;
+    border-left: 3px solid var(--accent); color: var(--text-sub);
+  }
+  .markdown code {
+    padding: .15em .4em; font-size: .88em; font-family: ui-monospace, Consolas, "Courier New", monospace;
+    background: #f1f2f4; border-radius: 4px; color: #b4232a;
+  }
+  .markdown pre {
+    margin: 0 0 1em; padding: 14px 16px; overflow-x: auto;
+    background: #f6f7f9; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .markdown pre code { padding: 0; background: none; color: var(--text); font-size: 13px; line-height: 1.6; }
+  .markdown a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(79,110,247,.35); }
+  .markdown a:hover { border-bottom-color: var(--accent); }
+  .markdown hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+  .markdown img { max-width: 100%; border-radius: 6px; }
+  .markdown del { color: var(--text-mute); }
+  .markdown .ph { color: var(--text-mute); font-size: 13.5px; }
 </style>
 </head>
 <body>
@@ -334,13 +393,25 @@
 
       <div id="edit-pane" class="hidden">
         <div id="editor-head">
+          <div class="mode-switch">
+            <button data-mode="edit">编辑</button>
+            <button data-mode="split">分栏</button>
+            <button data-mode="preview">预览</button>
+          </div>
           <span id="save-state">已保存</span>
           <button class="btn hidden" id="cancel-delete">取消</button>
           <button class="btn danger" id="delete">删除</button>
         </div>
         <div class="doc">
           <input id="title" placeholder="标题">
-          <textarea id="body" placeholder="开始写点什么…"></textarea>
+          <div class="panes">
+            <div class="pane pane-edit">
+              <textarea id="body" placeholder="开始写点什么…"></textarea>
+            </div>
+            <div class="pane pane-view">
+              <div id="preview" class="markdown"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -463,6 +534,156 @@ function renderList() {
     </div>`).join('');
 }
 
+// ============ Markdown 渲染（零依赖，自己写一个够用的） ============
+// 不用现成库是这个项目的硬约束（不装任何 npm 包），所以只能手写。
+//
+// 安全是第一位的：**先整体转义，再做 Markdown 替换**。
+// 这样笔记里写的 <script>、<img onerror=...> 会原样显示成文字，永远不会执行。
+//
+// 支持：# 标题、**粗体**、*斜体*、~~删除线~~、`行内代码`、``` 围栏代码块、
+//       - 无序列表、1. 有序列表、> 引用、--- 分隔线、[文字](链接)、![图](地址)
+
+const SAFE_SCHEME = /^(https?:|mailto:)/i;   // 只放行安全协议，防 javascript: 注入
+
+// 行内标记。传进来的是**原文**，转义在这一步最前面做。
+// 注意：不能先把整篇转义再切块 —— esc() 会把 > 变成 &gt;，
+// 后面再用 /^>/ 判断引用就永远匹配不上，引用会退化成普通段落。
+function mdInline(text) {
+  let t = esc(text);
+
+  // 行内代码先摘出来存好，否则里面的 * _ [ ] 会被后面的规则误伤。
+  // 占位符用 \u0001 包住：转义后的正文不可能出现这个控制符，所以不会撞车。
+  const codes = [];
+  t = t.replace(/`([^`]+)`/g, (m, c) => {
+    codes.push(c);
+    return `\u0001${codes.length - 1}\u0001`;
+  });
+
+  // 图片必须排在链接前面：
+  // ![alt](url) 里也含有 [alt](url)，链接规则先跑会把它吃掉，感叹号剩在外面。
+  t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
+    if (!SAFE_SCHEME.test(src)) return m;
+    return `<img src="${src}" alt="${alt}">`;
+  });
+
+  // 链接：协议不合法就原样显示（比如 javascript: 警告，点不得）
+  t = t.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (m, label, href) => {
+    if (!SAFE_SCHEME.test(href)) return m;
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+
+  t = t.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (m, a, b) => `<strong>${a || b}</strong>`);
+  t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  t = t.replace(/\*([^*\n]+)\*|_([^_\n]+)_/g, (m, a, b) => `<em>${a || b}</em>`);
+
+  // 把行内代码放回去（必须最后一步，否则代码里的符号会被上面的规则改掉）
+  return t.replace(/\u0001(\d+)\u0001/g, (m, i) => `<code>${codes[Number(i)]}</code>`);
+}
+
+function renderMarkdown(src) {
+  if (!src || !src.trim()) {
+    return '<p class="ph">左边写点内容，这里会实时显示渲染后的样子。</p>';
+  }
+  // 按**原文**切块，块级语法（> # ``` 等）在转义之前判断
+  const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+
+  const RE = {
+    fence:    /^```/,
+    heading:  /^(#{1,6})\s+(.*)$/,
+    hr:       /^\s*(-{3,}|\*{3,}|_{3,})\s*$/,
+    quote:    /^\s*>\s?/,
+    ul:       /^\s*[-*+]\s+/,
+    ol:       /^\s*\d+\.\s+/,
+  };
+  const isBlock = (l) =>
+    RE.fence.test(l) || RE.heading.test(l) || RE.hr.test(l) ||
+    RE.quote.test(l) || RE.ul.test(l) || RE.ol.test(l);
+
+  const nl2br = (s) => s.replace(/\n/g, '<br>');
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 围栏代码块：整块原样输出，不做任何行内替换（内容单独转义）
+    if (RE.fence.test(line)) {
+      i++;
+      const buf = [];
+      while (i < lines.length && !RE.fence.test(lines[i])) buf.push(lines[i++]);
+      i++;                                    // 跳过收尾围栏
+      out.push(`<pre><code>${esc(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // 标题
+    let m = line.match(RE.heading);
+    if (m) {
+      const lv = m[1].length;
+      out.push(`<h${lv}>${mdInline(m[2])}</h${lv}>`);
+      i++;
+      continue;
+    }
+
+    if (RE.hr.test(line)) { out.push('<hr>'); i++; continue; }
+
+    // 引用：连续 > 合成一块
+    if (RE.quote.test(line)) {
+      const buf = [];
+      while (i < lines.length && RE.quote.test(lines[i])) buf.push(lines[i++].replace(RE.quote, ''));
+      out.push(`<blockquote>${nl2br(mdInline(buf.join('\n')))}</blockquote>`);
+      continue;
+    }
+
+    // 无序列表
+    if (RE.ul.test(line)) {
+      const buf = [];
+      while (i < lines.length && RE.ul.test(lines[i])) buf.push(lines[i++].replace(RE.ul, ''));
+      out.push(`<ul>${buf.map((x) => `<li>${mdInline(x)}</li>`).join('')}</ul>`);
+      continue;
+    }
+
+    // 有序列表
+    if (RE.ol.test(line)) {
+      const buf = [];
+      while (i < lines.length && RE.ol.test(lines[i])) buf.push(lines[i++].replace(RE.ol, ''));
+      out.push(`<ol>${buf.map((x) => `<li>${mdInline(x)}</li>`).join('')}</ol>`);
+      continue;
+    }
+
+    // 空行
+    if (!line.trim()) { i++; continue; }
+
+    // 段落：连续的非块级行合成一段
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !isBlock(lines[i])) buf.push(lines[i++]);
+    out.push(`<p>${nl2br(mdInline(buf.join('\n')))}</p>`);
+  }
+  return out.join('\n');
+}
+// ============ 编辑 / 分栏 / 预览 切换 ============
+let mode = localStorage.getItem('wb-mode') || 'edit';   // 记住上次用的模式
+
+function setMode(m) {
+  mode = m;
+  localStorage.setItem('wb-mode', m);
+  $('edit-pane').className = 'mode-' + m;
+  document.querySelectorAll('.mode-switch button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.mode === m);
+  });
+  renderPreview();
+}
+
+// 编辑时才渲染预览，隐藏时不用白费力气
+function renderPreview() {
+  if (mode === 'edit') return;
+  $('preview').innerHTML = renderMarkdown(bodyEl.value);
+}
+
+document.querySelectorAll('.mode-switch button').forEach((b) => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
+});
+
 // ============ 保存状态提示 ============
 // 三种状态：编辑中(不提示) / 保存中(黄) / 已保存(绿)
 function setSaveState(state, text) {
@@ -483,6 +704,7 @@ function openNote(id) {
   $('edit-pane').classList.remove('hidden');
   setSaveState('saved', '已保存');
   renderList();                 // 高亮当前选中项
+  renderPreview();              // 切到预览模式时立刻显示这篇的内容
   titleEl.focus();
 }
 
@@ -648,9 +870,9 @@ $('export-btn').addEventListener('click', async () => {
   a.remove();
 });
 
-// 标题和正文变化 → 自动保存
-titleEl.addEventListener('input', scheduleSave);
-bodyEl.addEventListener('input', scheduleSave);
+// 标题和正文变化 → 自动保存 + 刷新预览
+titleEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
+bodyEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
 
 // 搜索框输入 → 实时过滤（防抖 300ms）
 let searchTimer = null;
@@ -706,6 +928,7 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 // ============ 启动 ============
+setMode(mode);
 loadList();
 </script>
 </body>
