@@ -297,6 +297,30 @@
     border-left: 1px solid var(--border-soft); padding-left: 36px;
   }
 
+  /* ---------- Markdown 输入工具栏 ---------- */
+  .md-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 3px;
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 0 10px; padding: 6px 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .md-toolbar button {
+    min-width: 28px; height: 28px; padding: 0 7px;
+    font-size: 13px; font-family: inherit; line-height: 1;
+    color: var(--text-sub); background: transparent;
+    border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+    transition: all .12s;
+  }
+  .md-toolbar button:hover { background: #f1f2f4; color: var(--text); }
+  .md-toolbar button:active { background: var(--accent-soft); color: var(--accent); }
+  .md-toolbar button b { font-weight: 700; }
+  .md-toolbar button i { font-style: italic; font-family: Georgia, serif; }
+  .md-toolbar .sep { width: 1px; height: 16px; margin: 0 4px; background: var(--border); }
+
+  /* 纯预览模式下不显示工具栏（没地方可操作） */
+  #edit-pane.mode-preview .md-toolbar { display: none; }
+
   /* ---------- Markdown 渲染出来的样式 ---------- */
   .markdown { font-size: 15.5px; line-height: 1.85; color: var(--text); word-wrap: break-word; }
   .markdown > *:first-child { margin-top: 0; }
@@ -404,6 +428,7 @@
         </div>
         <div class="doc">
           <input id="title" placeholder="标题">
+          <div class="md-toolbar" id="md-toolbar"></div>
           <div class="panes">
             <div class="pane pane-edit">
               <textarea id="body" placeholder="开始写点什么…"></textarea>
@@ -661,13 +686,124 @@ function renderMarkdown(src) {
   }
   return out.join('\n');
 }
+// ============ Markdown 输入工具栏 ============
+// 目的：让人不用背语法，也不用手动敲符号。选中一段文字点「粗体」就变成 **这段**。
+//
+// 两个关键细节：
+//  1) 点按钮时 textarea 会失焦，选区随之丢失。所以要在 mousedown 阶段 preventDefault，
+//     让 textarea 保持焦点，光标和选区才不会跑掉。
+//  2) 改完 value 后必须手动派发 input 事件，否则自动保存和实时预览都不会触发。
+
+// 统一的改写入口：替换选区 → 摆好光标 → 通知其它功能
+// caretEnd 省略时只摆光标；给了就把这一段选中，
+// 这样「插入链接」之类的操作可以直接覆盖粘贴。
+function replaceRange(s0, e0, text, caretStart, caretEnd) {
+  const ta = bodyEl;
+  const val = ta.value;
+  ta.value = val.slice(0, s0) + text + val.slice(e0);
+  ta.focus();
+  const end = caretEnd == null ? caretStart : caretEnd;
+  ta.setSelectionRange(caretStart, end);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));   // 触发自动保存 + 刷新预览
+}
+
+// 在光标处包一对符号。
+// 选了字就包住选区并保持选中（符合编辑器惯例，回车或再点一次就能取消）
+// 没选就插占位文字，并把占位词选中 —— 这样直接打字就能替换掉它
+function wrap(before, after, placeholder) {
+  const ta = bodyEl;
+  const s0 = ta.selectionStart, e0 = ta.selectionEnd;
+  const sel = ta.value.slice(s0, e0);
+  const inner = sel || placeholder;
+  replaceRange(s0, e0, before + inner + after, s0 + before.length, s0 + before.length + inner.length);
+}
+
+// 对「光标所在的行」做操作（多选时逐行处理）
+function eachLine(fn) {
+  const ta = bodyEl;
+  const val = ta.value;
+  const s0 = ta.selectionStart, e0 = ta.selectionEnd;
+  const start = val.lastIndexOf('\n', s0 - 1) + 1;
+  let end = val.indexOf('\n', e0);
+  if (end === -1) end = val.length;
+  const out = val.slice(start, end).split('\n').map(fn).join('\n');
+  replaceRange(start, end, out, start + out.length);
+}
+
+// 标题：点了再点同一个级别就取消，反之换成目标级别
+function toggleHeading(level) {
+  eachLine((line) => {
+    const bare = line.replace(/^\s*#{1,6}\s*/, '');
+    const wasSame = new RegExp('^\\s*#{' + level + '}\\s').test(line);
+    return wasSame ? bare : '#'.repeat(level) + ' ' + bare;
+  });
+}
+
+// 列表/引用：已有同样的前缀就取消，否则加上
+function toggleLinePrefix(prefix, re) {
+  eachLine((line) => re.test(line) ? line.replace(re, '') : prefix + line);
+}
+
+// 工具栏按钮配置。label 是按钮上显示的字，title 是鼠标悬停的说明。
+const MD_BUTTONS = [
+  { label: 'H1', title: '一级标题', run: () => toggleHeading(1) },
+  { label: 'H2', title: '二级标题', run: () => toggleHeading(2) },
+  { label: 'H3', title: '三级标题', run: () => toggleHeading(3) },
+  { sep: true },
+  { label: '<b>B</b>', title: '粗体　Ctrl+B', run: () => wrap('**', '**', '粗体') },
+  { label: '<i>I</i>', title: '斜体　Ctrl+I', run: () => wrap('*', '*', '斜体') },
+  { label: '<s>S</s>', title: '删除线', run: () => wrap('~~', '~~', '删除的文字') },
+  { label: '&lt;/&gt;', title: '行内代码', run: () => wrap('`', '`', '代码') },
+  { sep: true },
+  { label: '• 列表', title: '无序列表', run: () => toggleLinePrefix('- ', /^\s*-\s+/) },
+  { label: '1. 列表', title: '有序列表', run: () => eachLine((line, i) =>
+      /^\s*\d+\.\s+/.test(line) ? line.replace(/^\s*\d+\.\s+/, '') : `${i + 1}. ${line}`) },
+  { label: '❝ 引用', title: '引用块', run: () => toggleLinePrefix('> ', /^\s*>\s?/) },
+  { sep: true },
+  { label: '⌘ 代码块', title: '整段代码块', run: () => wrap('\n```\n', '\n```\n', '在这里写代码') },
+  { label: '🔗 链接', title: '插入链接（选中文字作为链接文字）', run: insertLink },
+  { label: '— 分隔线', title: '插入分隔线', run: () => {
+      const ta = bodyEl;
+      const at = ta.selectionStart;
+      const before = at > 0 && ta.value[at - 1] !== '\n' ? '\n' : '';
+      const after = at < ta.value.length && ta.value[at] !== '\n' ? '\n' : '';
+      replaceRange(at, at, `${before}\n---\n${after}`, at + before.length + 5);
+  } },
+];
+
+// 链接：选中文字就拿它当链接文字，然后把网址那段选中，等着粘贴
+function insertLink() {
+  const ta = bodyEl;
+  const s0 = ta.selectionStart, e0 = ta.selectionEnd;
+  const label = ta.value.slice(s0, e0) || '链接文字';
+  const url = 'https://';
+  const urlStart = s0 + label.length + 3;      // "[" + label + "](" 的长度
+  replaceRange(s0, e0, `[${label}](${url})`, urlStart, urlStart + url.length);
+}
+
+// 生成工具栏。分隔线本身不占索引，按钮用 data-i 记住自己是第几个。
+$('md-toolbar').innerHTML = MD_BUTTONS.map((b, i) =>
+  b.sep ? '<span class="sep"></span>'
+        : `<button type="button" data-i="${i}" title="${b.title}">${b.label}</button>`
+).join('');
+
+// 必须在 mousedown 就拦住，否则点按钮的这一刻 textarea 已经失焦，选区没了
+$('md-toolbar').addEventListener('mousedown', (e) => e.preventDefault());
+$('md-toolbar').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (btn) MD_BUTTONS[Number(btn.dataset.i)].run();
+});
+
 // ============ 编辑 / 分栏 / 预览 切换 ============
 let mode = localStorage.getItem('wb-mode') || 'edit';   // 记住上次用的模式
 
 function setMode(m) {
   mode = m;
   localStorage.setItem('wb-mode', m);
-  $('edit-pane').className = 'mode-' + m;
+  // 必须用 classList 增删，不能直接赋 className：
+  // 直接赋值会把 hidden 一起抹掉，导致没选中笔记时编辑器也显示出来。
+  $('edit-pane').classList.remove('mode-edit', 'mode-split', 'mode-preview');
+  $('edit-pane').classList.add('mode-' + m);
   document.querySelectorAll('.mode-switch button').forEach((b) => {
     b.classList.toggle('on', b.dataset.mode === m);
   });
@@ -907,6 +1043,12 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     searchEl.focus();
     searchEl.select();
+  } else if (e.key === 'b' || e.key === 'B') {   // 粗体
+    e.preventDefault();
+    wrap('**', '**', '粗体');
+  } else if (e.key === 'i' || e.key === 'I') {   // 斜体
+    e.preventDefault();
+    wrap('*', '*', '斜体');
   } else if (e.key === 's' || e.key === 'S') {   // 保存
     e.preventDefault();
     if (currentId !== null) {
