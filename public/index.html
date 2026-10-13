@@ -213,6 +213,23 @@
   #banner .btn { margin-left: auto; }
   #banner svg { flex-shrink: 0; width: 16px; height: 16px; }
 
+  /* ---- 撤销提示条：删错了还有后悔药 ---- */
+  #toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 12px 10px 16px; font-size: 13px;
+    color: #fff; background: #23262b; border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.22);
+    z-index: 50;
+  }
+  #toast.hidden { display: none !important; }
+  #toast button {
+    padding: 4px 10px; font-size: 13px; font-family: inherit; cursor: pointer;
+    color: #fff; background: rgba(255,255,255,.16);
+    border: 0; border-radius: 6px; font-weight: 500;
+  }
+  #toast button:hover { background: rgba(255,255,255,.28); }
+
   .btn {
     padding: 6px 13px; font-size: 13px; font-family: inherit;
     cursor: pointer; border-radius: 8px;
@@ -328,6 +345,12 @@
       </div>
     </section>
   </main>
+</div>
+
+<!-- 删除后的撤销条 -->
+<div id="toast" class="hidden">
+  <span id="toast-msg"></span>
+  <button id="toast-undo">撤销</button>
 </div>
 
 <script>
@@ -549,6 +572,7 @@ delBtn.addEventListener('click', async () => {
   if (!confirmArmed) { armDelete(); return; }   // 第一次点：只是进入待确认
 
   const id = currentId;
+  const note = notes.find((n) => n.id === id);
   disarmDelete();
   try {
     await api(`/api/notes/${id}`, { method: 'DELETE' });
@@ -558,9 +582,43 @@ delBtn.addEventListener('click', async () => {
   }
   closeEditor();
   await loadList();
+  showUndo(id, note ? note.title : '这条笔记');
 });
 
 cancelBtn.addEventListener('click', disarmDelete);
+
+// ============ 撤销删除 ============
+// 后端只是给笔记打了个删除时间戳，没有真删，所以这里能原样捞回来。
+let lastDeletedId = null;
+let toastTimer = null;
+
+// 显示撤销条。8 秒后自动消失，但笔记在数据库里仍然是「已删除」状态，
+// 随时可以用 POST /api/notes/:id/restore 捞回来。
+function showUndo(id, title) {
+  lastDeletedId = id;
+  $('toast-msg').textContent = `已删除「${title}」`;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 8000);
+}
+
+function hideToast() {
+  $('toast').classList.add('hidden');
+  lastDeletedId = null;
+}
+
+// 点「撤销」把刚才删掉的笔记恢复
+$('toast-undo').addEventListener('click', async () => {
+  if (lastDeletedId === null) return;
+  try {
+    await api(`/api/notes/${lastDeletedId}/restore`, { method: 'POST' });
+  } catch (e) {
+    showBanner(`恢复失败：${e.message}`);
+    return;
+  }
+  hideToast();
+  await loadList();
+});
 
 // ============ 事件绑定 ============
 // 点左侧列表某条 → 右侧载入
@@ -612,6 +670,7 @@ document.addEventListener('keydown', (e) => {
   // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
   if (e.key === 'Escape') {
     if (confirmArmed) { disarmDelete(); return; }
+    if (!$('toast').classList.contains('hidden')) { hideToast(); return; }
     if (searchEl.value) { searchEl.value = ''; loadList(); searchEl.blur(); return; }
     if (currentId !== null) { closeEditor(); }
     return;

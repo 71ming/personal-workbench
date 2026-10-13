@@ -22,14 +22,25 @@ db.exec(`
   );
 `);
 
+// 迁移：v1.1 加了软删除字段。SQLite 的 CREATE TABLE IF NOT EXISTS 不会改已有表，
+// 所以老库要单独补一列。这里先查表结构再决定要不要加，跑多少次都安全。
+const cols = db.prepare('PRAGMA table_info(notes)').all().map(c => c.name);
+if (!cols.includes('deleted_at')) {
+  db.exec("ALTER TABLE notes ADD COLUMN deleted_at TEXT");
+  console.log('已升级数据库：新增 deleted_at 字段（软删除）');
+}
+
+// 软删除：不真删，只打一个删除时间戳，撤销就是把时间戳清空。
+// 这样误删之后还能捞回来 —— 这是个人笔记库最需要的一个保险。
 const q = {
-  list:     db.prepare('SELECT id,title,body,updated_at FROM notes ORDER BY updated_at DESC'),
-  search:   db.prepare('SELECT id,title,body,updated_at FROM notes WHERE title LIKE ? OR body LIKE ? ORDER BY updated_at DESC'),
-  get:      db.prepare('SELECT id,title,body,created_at,updated_at FROM notes WHERE id = ?'),
+  list:     db.prepare('SELECT id,title,body,updated_at FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC'),
+  search:   db.prepare('SELECT id,title,body,updated_at FROM notes WHERE deleted_at IS NULL AND (title LIKE ? OR body LIKE ?) ORDER BY updated_at DESC'),
+  get:      db.prepare('SELECT id,title,body,created_at,updated_at,deleted_at FROM notes WHERE id = ?'),
   create:   db.prepare('INSERT INTO notes (title,body) VALUES (?,?)'),
-  update:   db.prepare('UPDATE notes SET title=?, body=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?'),
-  del:      db.prepare('DELETE FROM notes WHERE id = ?'),
-  allForExport: db.prepare('SELECT title,body,created_at,updated_at FROM notes ORDER BY created_at ASC'),
+  update:   db.prepare('UPDATE notes SET title=?, body=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=? AND deleted_at IS NULL'),
+  softDel:  db.prepare("UPDATE notes SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  restore:  db.prepare('UPDATE notes SET deleted_at=NULL WHERE id=?'),
+  allForExport: db.prepare('SELECT title,body,created_at,updated_at FROM notes WHERE deleted_at IS NULL ORDER BY created_at ASC'),
 };
 
 // ---------- 工具 ----------
@@ -124,10 +135,21 @@ async function api(req, res, url) {
     if (req.method === 'PUT') {
       const { title = '', body = '' } = await readBody(req);
       q.update.run(title.trim() || '无标题', body, id);
-      return send(res, 200, q.get.get(id));
+      const note = q.get.get(id);
+      // 已删除的笔记不让再改，否则撤销回来会带着一串意外内容
+      if (!note || note.deleted_at) return send(res, 404, { error: 'not found' });
+      return send(res, 200, note);
     }
+    // 撤销删除：把删除时间戳清空就回来了
+    if (req.method === 'POST' && seg[3] === 'restore') {
+      q.restore.run(id);
+      const note = q.get.get(id);
+      if (!note) return send(res, 404, { error: 'not found' });
+      return send(res, 200, note);
+    }
+    // 软删除
     if (req.method === 'DELETE') {
-      q.del.run(id);
+      q.softDel.run(id);
       return send(res, 200, { ok: true });
     }
   }
