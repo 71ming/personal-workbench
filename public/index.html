@@ -60,24 +60,31 @@
     height: 56px; padding: 0 20px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+    /* 窄屏的下拉菜单要贴着顶栏右下角弹出来，所以顶栏是它的定位参照 */
+    position: relative;
   }
-  .brand { display: flex; align-items: center; gap: 10px; user-select: none; }
+  .brand { display: flex; align-items: center; gap: 10px; user-select: none; flex-shrink: 0; }
   .brand-mark {
     width: 26px; height: 26px; border-radius: 8px;
     background: linear-gradient(135deg, #6d8bff, var(--accent));
     display: grid; place-items: center;
     color: #fff; font-size: 14px; font-weight: 700;
   }
-  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  /* nowrap 是必须的：窗口一窄，中文会被逐字断行，品牌名竖成一列 */
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; white-space: nowrap; }
 
   /* 搜索框 */
-  .search-wrap { position: relative; flex: 1; max-width: 460px; }
+  /* min-width:0 是这次问题的根因。flex 子项默认 min-width:auto，
+     不许缩到内容宽度以下；而搜索框里的 input 自带约 170px 固有宽度，
+     于是它怎么都不肯再缩，把右边三个按钮整个顶出屏幕 —— 看上去就是按钮不见了。
+     这跟坑 #9（flex 高度链断裂）是同一类毛病：不写这条，浏览器按自己的规则来。 */
+  .search-wrap { position: relative; flex: 1; max-width: 460px; min-width: 0; }
   .search-wrap svg {
     position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
     width: 15px; height: 15px; color: var(--text-mute); pointer-events: none;
   }
   #search {
-    width: 100%; padding: 8px 12px 8px 34px;
+    width: 100%; min-width: 0; padding: 8px 12px 8px 34px;
     font-size: 13.5px; font-family: inherit; color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius);
     background: #fafbfc; outline: none;
@@ -91,7 +98,7 @@
   #search::-webkit-search-cancel-button { cursor: pointer; }
 
   /* 顶部右侧的次要操作按钮 */
-  .head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   /* 导出和 AI 两个按钮共用一套外观。
      原来这条只写在 #export-btn 上，v3 加 AI 按钮时没吃到样式，
      结果按钮塌成一条竖着的窄片（文字被挤到换行）—— 一眼就看得出来是外挂上去的。
@@ -105,6 +112,75 @@
   }
   #export-btn:hover, #ai-btn:hover, #ask-btn:hover { background: #f4f5f7; color: var(--text); }
   #export-btn svg, #ai-btn svg, #ask-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  /* ==========================================================
+     v4 · 顶栏窄屏折叠
+     ------------------------------------------------------------
+     顶栏这一行东西的宽度是死的：品牌 + 三个视图标签 + 搜索框 + 三个操作按钮，
+     全部摆开最宽要 1075px。窗口一旦变窄，最先被压的是搜索框，
+     而搜索框没写 min-width:0 就不肯再缩 —— 结果右边的按钮被顶出可视区，
+     界面上就是「AI 设置和导出备份凭空消失了」。
+
+     这里分两步治：
+       ① 上面那几处 min-width / flex-shrink / nowrap 是根因修复；
+       ② 再用一条 @media，把三个不常用的按钮（问 AI / AI 设置 / 导出备份）
+          收进「菜单按钮」展开的下拉里，顶栏只剩 品牌 + 标签 + 搜索 + 菜单。
+
+     宽屏（>=900px）一点没变：菜单按钮 display:none，
+     .head-actions 仍然是原来那一排并排按钮。
+     ========================================================== */
+
+  /* 折叠菜单的触发按钮。宽屏不显示，所以宽屏顶栏跟以前一模一样。 */
+  #menu-btn {
+    display: none;                  /* 宽屏隐藏；下面 @media 里改成 inline-flex */
+    align-items: center; justify-content: center;
+    width: 34px; height: 34px; flex-shrink: 0; padding: 0;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface); color: var(--text-sub);
+    cursor: pointer;
+  }
+  #menu-btn:hover { background: #f4f5f7; color: var(--text); }
+  #menu-btn svg { width: 17px; height: 17px; }
+  /* 菜单开着时按钮高亮，跟「菜单是展开的」这件事对得上 */
+  #menu-btn[aria-expanded="true"] {
+    background: #eef1ff; border-color: var(--accent); color: var(--accent);
+  }
+
+  /* ---------- 窄屏：低于 900px 折叠成菜单 ---------- */
+  @media (max-width: 899px) {
+    header { gap: 12px; padding: 0 12px; }
+
+    #menu-btn { display: inline-flex; }
+
+    /* 三个不常用的按钮改成下拉面板。
+       注意这里没有另做一套按钮，而是让 .head-actions 自己变成下拉：
+       宽屏它是并排的按钮行，窄屏它是竖排菜单 —— 同一批按钮、同一批事件监听，
+       所以一行 JS 都不用改，也不可能出现「宽屏那份和窄屏那份行为不一样」。 */
+    #head-actions {
+      position: absolute; top: calc(100% + 6px); right: 12px;
+      flex-direction: column; align-items: stretch; gap: 2px;
+      margin-left: 0; padding: 6px;
+      background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 8px 24px rgba(20, 24, 33, .12);
+      display: none;                 /* 默认收起，加 .open 才展开 */
+      z-index: 60;                   /* 压在下面的列表上面，不然会被盖住 */
+    }
+    #head-actions.open { display: flex; }
+
+    /* 竖排菜单里的按钮：撑满一整行，图标和文字靠左，读起来才像一份菜单 */
+    #ask-btn, #ai-btn, #export-btn {
+      width: 100%; justify-content: flex-start; padding: 9px 12px;
+    }
+
+    /* 窄屏搜索框吃掉剩下的全部宽度，不再卡在 460px */
+    .search-wrap { max-width: none; }
+  }
+
+  /* ---------- 极窄（手机竖屏）：品牌只留「记」这个方块 ---------- */
+  @media (max-width: 560px) {
+    .brand h1 { display: none; }
+  }
 
   /* ================= 主体两栏 ================= */
   main { flex: 1; display: flex; min-height: 0; }
@@ -806,7 +882,8 @@
            stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
       <input id="search" type="search" placeholder="搜索标题和正文…">
     </div>
-    <div class="head-actions">
+    <!-- v4：窄屏时这三个不常用的按钮收进下面的折叠菜单（宽屏仍然并排显示） -->
+    <div class="head-actions" id="head-actions">
       <!-- v3：问 AI。第 1、2 步已上线（设置 + 调用器），这一步加了面板。 -->
       <button id="ask-btn" title="勾几条笔记，问 AI 一个问题">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -835,6 +912,14 @@
         导出备份
       </button>
     </div>
+
+    <!-- 折叠菜单的触发按钮。宽屏 display:none，界面上看不到；
+         窄屏（<900px）才出现，点它展开上面那三个功能。 -->
+    <button id="menu-btn" title="更多功能" aria-label="更多功能"
+            aria-haspopup="true" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
   </header>
 
   <!-- 出错时才出现的横幅 -->
@@ -2691,6 +2776,43 @@ const HINTS = {
   ask: '勾几条笔记，然后问一个问题<br><kbd>Esc</kbd> 清空',
 };
 function renderHints() { $('hints').innerHTML = HINTS[view]; }
+// ============ v4：窄屏折叠菜单 ============
+// 顶栏窄到放不下时，右边那三个不常用的功能（问 AI / AI 设置 / 导出备份）
+// 收进 #head-actions 这个下拉里，由 #menu-btn 控制展开收起。
+// 宽屏时这一整套等于空转：菜单按钮根本不显示，展开的样式也不生效。
+
+const menuBtn = $('menu-btn');
+const headActions = $('head-actions');
+
+function setMenuOpen(open) {
+  // 用 classList 增删（见坑 #7），不要直接赋 className
+  headActions.classList.toggle('open', open);
+  menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+const menuIsOpen = () => headActions.classList.contains('open');
+
+menuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();   // 不加这句，下面「点空白处收起」会在同一轮里立刻把它关掉
+  setMenuOpen(!menuIsOpen());
+});
+
+// 点菜单外面任何地方 → 收起
+document.addEventListener('click', (e) => {
+  if (!menuIsOpen()) return;
+  if (headActions.contains(e.target) || menuBtn.contains(e.target)) return;
+  setMenuOpen(false);
+});
+
+// 点菜单里的任何一个功能 → 用完就收起，不然菜单一直挂在屏幕上挡着列表
+headActions.addEventListener('click', () => setMenuOpen(false));
+
+// 窗口从窄变宽时把状态清掉：不然 .open 会残留在元素上，
+// 下次再变窄回来时菜单莫名其妙是展开的。
+// 另外注意这里的 900 必须和 CSS 里 @media (max-width: 899px) 对上，
+// 以后要改断点，这两处得一起改。
+window.addEventListener('resize', () => {
+  if (window.innerWidth >= 900) setMenuOpen(false);
+});
 
 // ============ 键盘快捷键 ============
 // 注意：Ctrl+N（浏览器新窗口）和 Ctrl+F（浏览器查找）是 Chrome 的保留键，
@@ -2702,6 +2824,7 @@ function renderHints() { $('hints').innerHTML = HINTS[view]; }
 document.addEventListener('keydown', (e) => {
   // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
   if (e.key === 'Escape') {
+    if (menuIsOpen()) { setMenuOpen(false); return; }   // 菜单开着就先关菜单
     if (bookmarkConfirmArmed) { bookmarkDisarmDelete(); return; }
     if (taskConfirmArmed) { taskDisarmDelete(); return; }
     if (confirmArmed) { disarmDelete(); return; }
