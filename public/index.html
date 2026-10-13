@@ -777,6 +777,55 @@ function listTitle(raw, url) {
   return '（无标题）';
 }
 
+// 把 Markdown 源码洗成一段能直接给人看的纯文字，用来当列表上的摘要。
+//
+// 为什么不能直接截正文：笔记正文是 Markdown 源码，列表上一条笔记底下直接甩出
+// `## 核心观点 **减少表面工作**`、`| 优点 | 缺点 |`、`\`node:sqlite\`` 这种东西，
+// 满屏符号，谁也没法扫读 —— 那不是「预览」，是把源码摊开了。
+//
+// 原则是**只去标记、留文字**，不跳过标题行：
+// 「核心观点」这几个字本身就是内容，跳掉反而丢信息。
+// 注意清洗完的纯文本最后还是要过 esc()（mark() 内部已经做了），这里不碰 HTML。
+//
+// 一个有意的取舍：搜索是**搜原文**、摘要显示的是**洗过的文字**，两者不完全一致。
+// 所以搜索词正好落在代码块里时，笔记会被搜到，但摘要上看不到这个词在哪。
+// 这是可接受的 —— 全文搜索本来就该能搜到代码，而摘要只是预览，点进去就看见了。
+// 反过来（为了显示搜索词而把代码塞回摘要）会让每条笔记底下都拖着一段代码，更糟。
+function plainText(md, maxLen = 120) {
+  let s = String(md ?? '');
+  // 围栏代码块整段拿掉（含没写完的半截）。代码塞进摘要里只会是一堆噪音，
+  // 而且很容易正好把真正的那段话挤到第 200 个字以外，看都看不到。
+  s = s.replace(/```[\s\S]*?(?:```|$)/g, '\n');
+
+  const out = [];
+  for (const raw of s.split('\n')) {
+    let t = raw.trim();
+    if (!t) continue;
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) continue;          // 分隔线
+    t = t.replace(/^#{1,6}\s*/, '');                          // 标题井号
+    t = t.replace(/^>\s?/, '');                               // 引用符号
+    t = t.replace(/^([-*+]|\d+[.)])\s+/, '');                 // 列表符号
+    // 表格行：把竖线和分隔用的 --- 那一行去掉，只留单元格文字
+    if (/^\|.*\|$/.test(t)) {
+      t = t.split('|').map((c) => c.trim()).filter((c) => c && !/^:?-{2,}:?$/.test(c)).join(' ');
+      if (!t) continue;
+    }
+    // 行内标记。顺序有讲究：图片和链接要先剥（它们的 alt/文字里可能带星号），
+    // 粗体和斜体最后剥，否则 `[**重点**](url)` 会剩下半截符号。
+    t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+         .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+         .replace(/`([^`]*)`/g, '$1')
+         .replace(/\*\*([^*]+)\*\*/g, '$1')
+         .replace(/__([^_]+)__/g, '$1')
+         .replace(/~~([^~]+)~~/g, '$1')
+         .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')
+         .replace(/(^|[^_])_([^_]+)_/g, '$1$2');
+    if (t) out.push(t);
+  }
+  const text = out.join(' ').replace(/\s+/g, ' ').trim();
+  return text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
+}
+
 // 把 "2026-10-13 15:04:05" 显示成好读的样子
 function fmtTime(s) {
   if (!s) return '';
@@ -866,7 +915,7 @@ function renderList() {
         <span class="t">${esc(listTitle(n.title))}</span>
         <span class="d">${fmtTime(n.updated_at)}</span>
       </div>
-      <div class="snippet">${esc(n.body || '')}</div>
+      <div class="snippet">${esc(plainText(n.body, 120))}</div>
     </div>`).join('');
 }
 
@@ -2057,7 +2106,7 @@ function renderSearchResults(keyword, data) {
           <span class="t">${mark(listTitle(n.title), keyword)}</span>
           <span class="kind-tag">笔记</span>
         </div>
-        <div class="snippet">${mark(n.body || '', keyword)}</div>
+        <div class="snippet">${mark(plainText(n.body, 120), keyword)}</div>
       </div>`).join('');
   }
 
