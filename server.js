@@ -167,6 +167,22 @@ function handleExport(req, res) {
   res.end(text);
 }
 
+// ---------- 统一搜索 ----------
+// 一次把笔记和任务都搜出来，前端只用发一个请求、只等一次响应。
+// 「哪些东西能被搜到」这个决定收在后端这一处：
+// 以后加了收藏表，这里加一段查询、返回里加一个 key，前端只管渲染。
+function handleSearch(res, keyword) {
+  const s = keyword.trim();
+  if (!s) return send(res, 200, { keyword: '', notes: [], tasks: [] });
+  const kw = `%${s}%`;
+  return send(res, 200, {
+    keyword: s,
+    // 复用已经测过的两条查询：笔记搜标题和正文，任务搜标题
+    notes: q.search.all(kw, kw),
+    tasks: tq.search.all(kw),
+  });
+}
+
 // ---------- 接口 ----------
 async function api(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean); // ['api','notes',id?]
@@ -174,6 +190,11 @@ async function api(req, res, url) {
   // 导出全部笔记为 Markdown 文件
   if (req.method === 'GET' && url.pathname === '/api/export') {
     return handleExport(req, res);
+  }
+
+  // 统一搜索：笔记 + 任务一起搜
+  if (req.method === 'GET' && url.pathname === '/api/search') {
+    return handleSearch(res, url.searchParams.get('q') || '');
   }
 
   // 笔记列表 / 搜索

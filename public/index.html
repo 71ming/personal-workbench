@@ -468,6 +468,32 @@
   /* 刚勾完的任务闪一下绿，给个「生效了」的反馈 */
   .task-item.flash { animation: flashbg .9s ease-out; }
   @keyframes flashbg { from { background: #eaf7f0; } to { background: transparent; } }
+
+  /* ---------- 统一搜索结果 ---------- */
+  /* 搜索框里有字时，左侧列表整个换成这个面板（笔记和任务混在一起） */
+  #search-results { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+  #search-summary {
+    padding: 10px 12px; margin: 0 -8px 6px;
+    font-size: 12px; color: var(--text-sub);
+    background: var(--accent-soft); border-bottom: 1px solid #e0e6ff;
+  }
+  #search-summary b { color: var(--accent); font-weight: 600; }
+  #search-summary .none { color: var(--text-mute); }
+  /* 「笔记」「任务」两个小节标题，和任务列表里的 .list-sec 同一套样式 */
+  .result-head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 12px 4px; font-size: 11.5px; color: var(--text-mute);
+  }
+  .result-head b { font-weight: 600; color: var(--text-sub); }
+  /* 结果上的类型标签，让人一眼看出这条是笔记还是任务 */
+  .kind-tag {
+    flex-shrink: 0; padding: 1px 6px; font-size: 10.5px; line-height: 1.7;
+    border-radius: 4px; color: var(--accent); background: var(--accent-soft);
+  }
+  .kind-tag.task { color: #1a7f4f; background: #eaf7f0; }
+  /* 搜索词在摘要里高亮出来 */
+  .result-item .snippet mark { background: #fff2b8; color: inherit; border-radius: 2px; }
+
 </style>
 </head>
 <body>
@@ -515,6 +541,7 @@
     <aside id="sidebar">
       <div id="note-list"></div>
       <div id="task-list" class="hidden"></div>
+      <div id="search-results" class="hidden"></div>
       <div class="sidebar-foot">
         <button id="new-note">＋ 新建笔记</button>
         <button id="new-task" class="hidden">＋ 新建任务</button>
@@ -653,7 +680,7 @@ function showBanner(msg) {
 function hideBanner() {
   $('banner').classList.add('hidden');
 }
-$('banner-retry').addEventListener('click', () => view === 'tasks' ? loadTasks() : loadList());
+$('banner-retry').addEventListener('click', () => runSearch(searchEl.value));
 
 // 列表加载失败时的专用空状态：说清楚是「连不上」而不是「没内容」
 function renderListError(msg) {
@@ -680,6 +707,7 @@ async function loadList(keyword = searchEl.value.trim()) {
     return;
   }
   hideBanner();
+  syncListVisibility();
   renderList();
 }
 
@@ -1163,12 +1191,12 @@ $('export-btn').addEventListener('click', async () => {
 titleEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
 bodyEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
 
-// 搜索框输入 → 实时过滤（防抖 300ms）
-// 同一个搜索框在两个视图里都能用，这里按当前视图决定搜什么
+// 搜索框输入 → 统一搜索（防抖 300ms）
+// 不分视图了：框里有字就搜笔记 + 任务，这是 v2.2 改掉的
 let searchTimer = null;
 searchEl.addEventListener('input', () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => view === 'tasks' ? loadTasks() : loadList(), 300);
+  searchTimer = setTimeout(() => runSearch(searchEl.value), 300);
 });
 
 // ============ v2：任务 ============
@@ -1181,6 +1209,7 @@ let currentTaskId = null;  // 正在查看的任务 id
 let taskSaveTimer = null;  // 任务自动保存的防抖计时器
 
 const taskListEl = $('task-list');
+const searchResultsEl = $('search-results');
 const taskTitleEl = $('task-title'), taskDueEl = $('task-due'), taskStateEl = $('task-state');
 const taskDelBtn = $('task-delete'), taskCancelBtn = $('task-cancel'), taskToggleBtn = $('task-toggle');
 
@@ -1219,6 +1248,7 @@ async function loadTasks(keyword = searchEl.value.trim()) {
     return;
   }
   hideBanner();
+  syncListVisibility();
   renderTasks();
 }
 
@@ -1429,6 +1459,135 @@ taskListEl.addEventListener('click', (e) => {
 
 $('new-task').addEventListener('click', createTask);
 
+// ============ v2.2：统一搜索（笔记 + 任务一起搜） ============
+// 以前搜索框只过滤当前视图的列表，想找的东西在另一个视图里就得先切过去再搜。
+// 现在搜索框是全局的：框里有字，左侧就变成「笔记和任务的混合结果」。
+//
+// 「搜索模式」的唯一判据是搜索框里有没有字 —— 不要另外维护一个状态变量，
+// 否则清空搜索框时很容易忘了同步。
+
+function inSearchMode() {
+  return !!searchEl.value.trim();
+}
+
+// 统一决定左侧该显示谁：搜索结果面板 / 笔记列表 / 任务列表。
+// 所有会改变列表的路径都调它，这样就不会出现「切了视图但显示的还是旧面板」。
+function syncListVisibility() {
+  const searching = inSearchMode();
+  searchResultsEl.classList.toggle('hidden', !searching);
+  $('note-list').classList.toggle('hidden', searching || view !== 'notes');
+  $('task-list').classList.toggle('hidden', searching || view !== 'tasks');
+  $('new-note').classList.toggle('hidden', searching || view !== 'notes');
+  $('new-task').classList.toggle('hidden', searching || view !== 'tasks');
+}
+
+// 把命中的搜索词标黄。
+// 顺序必须是「先转义、再插标签」：反过来的话，笔记里写 <script> 之类
+// 的内容会先变成标签再被当成 HTML，一条笔记就能执行脚本。
+// 用 split/join 而不是 replace，避免用户搜的词里带正则特殊字符时出错。
+function mark(text, keyword) {
+  const safe = esc(text || '');
+  if (!keyword) return safe;
+  const kw = esc(keyword);
+  if (!kw) return safe;
+  return safe.split(kw).join(`<mark>${kw}</mark>`);
+}
+
+function renderSearchResults(keyword, data) {
+  const rNotes = data.notes || [];
+  const rTasks = data.tasks || [];
+  const total = rNotes.length + rTasks.length;
+
+  let html = `<div id="search-summary">搜索「<b>${esc(keyword)}</b>」　共 ${total} 条` +
+             `${rNotes.length ? `　笔记 ${rNotes.length}` : ''}` +
+             `${rTasks.length ? `　任务 ${rTasks.length}` : ''}</div>`;
+
+  if (total === 0) {
+    html += `<div class="empty">${EMPTY_ICON}<p>笔记和任务里都没有「${esc(keyword)}」</p></div>`;
+    searchResultsEl.innerHTML = html;
+    return;
+  }
+
+  if (rNotes.length) {
+    html += `<div class="result-head"><b>笔记</b></div>`;
+    html += rNotes.map((n) => `
+      <div class="item result-item" data-kind="note" data-id="${n.id}">
+        <div class="item-head">
+          <span class="t">${mark(n.title, keyword)}</span>
+          <span class="kind-tag">笔记</span>
+        </div>
+        <div class="snippet">${mark(n.body || '', keyword)}</div>
+      </div>`).join('');
+  }
+
+  if (rTasks.length) {
+    html += `<div class="result-head"><b>任务</b></div>`;
+    html += rTasks.map((t) => {
+      const isDone = t.status === 'done';
+      const due = isDone ? null : dueLabel(t.due_date);
+      const dueHtml = due ? `<span class="due ${due.cls}">${esc(due.text)}</span>` : '';
+      return `
+      <div class="item result-item task-item ${isDone ? 'done' : ''}" data-kind="task" data-id="${t.id}">
+        <div class="item-head">
+          <span class="t">${mark(t.title, keyword)}</span>
+          <span class="kind-tag task">任务</span>
+        </div>
+        ${dueHtml}
+      </div>`;
+    }).join('');
+  }
+  searchResultsEl.innerHTML = html;
+}
+
+// 搜索入口。搜索框为空 = 退出搜索模式，回到当前视图的正常列表。
+async function runSearch(keyword) {
+  const s = keyword.trim();
+  // 搜索框的值就是「搜索模式」的唯一依据。
+  // 必须先把输入框改到位，再让 syncListVisibility 去判断，否则会按旧的值判断。
+  if (keyword !== searchEl.value) searchEl.value = keyword;
+  if (!s) {
+    syncListVisibility();          // 退出搜索模式，隐藏搜索结果面板
+    view === 'tasks' ? await loadTasks() : await loadList();
+    return;
+  }
+  syncListVisibility();
+  try {
+    const data = await api(`/api/search?q=${encodeURIComponent(s)}`);
+    hideBanner();
+    renderSearchResults(s, data);
+  } catch (e) {
+    // 只在真的是「服务连不上」时才说连不上。
+    // 以前这里不管抛的是什么错，一律显示「连不上工作台服务」——
+    // 结果自己代码里一个变量名写错（ReferenceError）也被说成网络故障，
+    // 排查方向当场就跑偏了。先把真错误打进控制台，再按类型分开说。
+    console.error('统一搜索失败：', e);
+    const offline = e.message === '连不上工作台服务';
+    searchResultsEl.innerHTML = `
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.5 9.5 12 3l7.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19z"/>
+          <path d="M12 9v4M12 16.5v.01"/>
+        </svg>
+        <p>${offline
+          ? '连不上工作台服务，搜不了。请确认黑色命令行窗口还开着。'
+          : `搜索出错：${esc(e.message)}`}</p>
+      </div>`;
+    showBanner(offline ? '连不上工作台服务。' : `搜索出错：${e.message}`);
+  }
+}
+
+// 点搜索结果 → 切到它所属的视图并打开
+searchResultsEl.addEventListener('click', async (e) => {
+  const item = e.target.closest('.item');
+  if (!item) return;
+  const kind = item.dataset.kind;
+  const id = Number(item.dataset.id);
+  // setView 会清空搜索框（也就是退出搜索模式），所以要等它把列表加载完再打开
+  await setView(kind === 'task' ? 'tasks' : 'notes');
+  if (kind === 'task') openTask(id); else openNote(id);
+});
+
 // ============ 视图切换（笔记 / 任务） ============
 // 切之前一定要把当前视图没存完的内容补存一次，
 // 否则「刚打了一半标题就切走」会丢掉最后那 800ms 的输入。
@@ -1442,24 +1601,32 @@ async function flushSaves() {
 }
 
 async function setView(v) {
-  if (v === view) return;
-  await flushSaves();      // 等补存完成再切，免得两个列表的请求交叉
-  view = v;
+  const changed = v !== view;
+  const searching = inSearchMode();
+  // 已经在目标视图、也没在搜索 —— 什么都不用做（点当前这个标签就是这么个情况）
+  if (!changed && !searching) return;
 
-  // 必须用 classList 增删（见坑 #7）：直接赋 className 会把 hidden 一起抹掉
-  document.querySelectorAll('#view-switch button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.view === v));
-  $('editor').classList.toggle('hidden', v !== 'notes');
-  $('task-pane').classList.toggle('hidden', v !== 'tasks');
-  $('note-list').classList.toggle('hidden', v !== 'notes');
-  $('task-list').classList.toggle('hidden', v !== 'tasks');
-  $('new-note').classList.toggle('hidden', v !== 'notes');
-  $('new-task').classList.toggle('hidden', v !== 'tasks');
-  searchEl.value = '';           // 换视图时清掉搜索词：搜笔记的词留到任务页只会让人以为笔记丢了
-  searchEl.placeholder = v === 'notes' ? '搜索标题和正文…' : '搜索任务标题…';
-  renderHints();
-  hideToast();
-  if (v === 'notes') loadList(); else loadTasks();
+  if (changed) {
+    await flushSaves();      // 等补存完成再切，免得两个列表的请求交叉
+    view = v;
+    // 必须用 classList 增删（见坑 #7）：直接赋 className 会把 hidden 一起抹掉
+    document.querySelectorAll('#view-switch button').forEach((b) =>
+      b.classList.toggle('on', b.dataset.view === v));
+    $('editor').classList.toggle('hidden', v !== 'notes');
+    $('task-pane').classList.toggle('hidden', v !== 'tasks');
+    searchEl.placeholder = v === 'notes' ? '搜索标题和正文…' : '搜索任务标题…';
+    renderHints();
+    hideToast();
+  }
+
+  // 清掉搜索词就是退出搜索模式。所以哪怕视图没变（从搜索结果点回同类的条目），
+  // 这里也必须往下走，把搜索结果面板换成正常列表。
+  // 换视图时清空是有意的：搜笔记的词留到任务页，只会让人以为笔记丢了。
+  searchEl.value = '';
+  syncListVisibility();
+  // 这里要 await：搜索结果点进来时，拿到 id 之后马上要 openNote/openTask，
+  // 列表必须已经加载好了，否则 find 不到这条、编辑器不会打开。
+  if (v === 'notes') await loadList(); else await loadTasks();
 }
 
 document.querySelectorAll('#view-switch button').forEach((b) => {
@@ -1488,7 +1655,7 @@ document.addEventListener('keydown', (e) => {
     if (taskConfirmArmed) { taskDisarmDelete(); return; }
     if (confirmArmed) { disarmDelete(); return; }
     if (!$('toast').classList.contains('hidden')) { hideToast(); return; }
-    if (searchEl.value) { searchEl.value = ''; view === 'tasks' ? loadTasks('') : loadList(''); searchEl.blur(); return; }
+    if (searchEl.value) { searchEl.value = ''; runSearch(''); searchEl.blur(); return; }
     if (view === 'tasks') { if (currentTaskId !== null) closeTaskEditor(); return; }
     if (currentId !== null) { closeEditor(); }
     return;
