@@ -176,6 +176,20 @@
   #save-state.saving::before { background: var(--warn); }
   #save-state.saved  { background: #eaf7f0; color: #1a7f4f; }
   #save-state.saved::before { background: var(--ok); }
+  /* 保存失败：变红，并且点它可以手动重试 */
+  #save-state.error { background: #fdeced; color: #b4232a; cursor: pointer; }
+  #save-state.error::before { background: var(--danger); }
+  #save-state.error:hover { background: #fbdcdf; }
+
+  /* ---- 顶部错误横幅：后端连不上时明确告诉用户，别装作「没有笔记」 ---- */
+  #banner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 20px; font-size: 13px;
+    background: #fdeced; color: #b4232a;
+    border-bottom: 1px solid #f5cfd1;
+  }
+  #banner .btn { margin-left: auto; }
+  #banner svg { flex-shrink: 0; width: 16px; height: 16px; }
 
   .btn {
     padding: 6px 13px; font-size: 13px; font-family: inherit;
@@ -235,6 +249,15 @@
       <input id="search" type="search" placeholder="搜索标题和正文…">
     </div>
   </header>
+
+  <!-- 出错时才出现的横幅 -->
+  <div id="banner" class="hidden">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round"><circle cx="12" cy="12" r="9"/>
+         <path d="M12 8v5M12 16.5v.01"/></svg>
+    <span id="banner-msg"></span>
+    <button class="btn" id="banner-retry">重试</button>
+  </div>
 
   <main>
     <!-- 左侧：笔记列表 -->
@@ -304,20 +327,59 @@ function fmtTime(s) {
   return d.getFullYear() === now.getFullYear() ? `${ymd}` : ymd;  // 今年内不显示年份
 }
 
-// 调用后端接口
+// 调用后端接口。失败时抛出带中文说明的错误，交给调用方处理。
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+  } catch (e) {
+    // fetch 抛错 = 服务根本没连上（服务没启动、端口不通）
+    throw new Error('连不上工作台服务');
+  }
   if (!res.ok) throw new Error(`接口出错：${res.status}`);
   return res.status === 204 ? null : res.json();
+}
+
+// ============ 错误提示 ============
+// 后端挂了要明确说出来。以前这里 catch 都不 catch，服务一停页面就默默显示
+// 「没有笔记」，会让人以为笔记全没了。
+function showBanner(msg) {
+  $('banner-msg').textContent = msg;
+  $('banner').classList.remove('hidden');
+}
+function hideBanner() {
+  $('banner').classList.add('hidden');
+}
+$('banner-retry').addEventListener('click', () => loadList());
+
+// 列表加载失败时的专用空状态：说清楚是「连不上」而不是「没内容」
+function renderListError(msg) {
+  listEl.innerHTML = `
+    <div class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 9.5 12 3l7.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19z"/>
+        <path d="M12 9v4M12 16.5v.01"/>
+      </svg>
+      <p>${esc(msg)}</p>
+    </div>`;
 }
 
 // ============ 列表 ============
 async function loadList(keyword = searchEl.value.trim()) {
   const url = keyword ? `/api/notes?search=${encodeURIComponent(keyword)}` : '/api/notes';
-  notes = await api(url);
+  try {
+    notes = await api(url);
+  } catch (e) {
+    // 加载失败：显示错误状态，不能当成「一条笔记都没有」
+    renderListError('连不上工作台服务。请确认黑色命令行窗口还开着。');
+    showBanner('连不上工作台服务。如果你没关掉命令行窗口，可能是它已经退出了。');
+    return;
+  }
+  hideBanner();
   renderList();
 }
 
@@ -373,17 +435,34 @@ function closeEditor() {
 }
 
 // 立即保存当前笔记
+let saveFailed = false;   // 记录是否保存失败，关页面时要拦一道
+
 async function saveNow() {
   if (currentId === null) return;
   setSaveState('saving', '保存中…');
-  await api(`/api/notes/${currentId}`, {
-    method: 'PUT',
-    body: JSON.stringify({ title: titleEl.value, body: bodyEl.value }),
-  });
+  try {
+    await api(`/api/notes/${currentId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ title: titleEl.value, body: bodyEl.value }),
+    });
+  } catch (e) {
+    // 保存失败：一定要显眼。不能默默失败——用户会以为存好了，其实内容会丢。
+    saveFailed = true;
+    setSaveState('error', '保存失败，点此重试');
+    showBanner(`没能保存：${e.message}。你的内容还在输入框里，恢复服务后再点重试。`);
+    return;
+  }
+  saveFailed = false;
+  hideBanner();
   const t = new Date();
   setSaveState('saved', `已保存 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`);
   await loadList();             // 刷新列表，让标题和更新时间同步
 }
+
+// 点红色的「保存失败」手动重试
+stateEl.addEventListener('click', () => {
+  if (saveFailed) { clearTimeout(saveTimer); saveNow(); }
+});
 
 // 输入后自动保存（防抖 800ms：停止打字 0.8 秒才存）
 function scheduleSave() {
@@ -393,10 +472,16 @@ function scheduleSave() {
 }
 
 async function createNote() {
-  const n = await api('/api/notes', {
-    method: 'POST',
-    body: JSON.stringify({ title: '无标题', body: '' }),
-  });
+  let n;
+  try {
+    n = await api('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ title: '无标题', body: '' }),
+    });
+  } catch (e) {
+    showBanner(`新建失败：${e.message}`);
+    return;
+  }
   searchEl.value = '';          // 清掉搜索，保证新笔记在列表里可见
   await loadList('');
   openNote(n.id);
@@ -427,8 +512,14 @@ delBtn.addEventListener('click', async () => {
 
   if (!confirmArmed) { armDelete(); return; }   // 第一次点：只是进入待确认
 
+  const id = currentId;
   disarmDelete();
-  await api(`/api/notes/${currentId}`, { method: 'DELETE' });
+  try {
+    await api(`/api/notes/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    showBanner(`删除失败：${e.message}`);
+    return;                    // 失败了就不关编辑器，笔记还在，用户可以重试
+  }
   closeEditor();
   await loadList();
 });
@@ -456,9 +547,14 @@ searchEl.addEventListener('input', () => {
   searchTimer = setTimeout(() => loadList(), 300);
 });
 
-// 页面关闭前把没存完的内容补存一次
+// 页面关闭前把没存完的内容补存一次；
+// 如果上次保存失败过，就拦一下，别让用户稀里糊涂丢掉内容。
 window.addEventListener('beforeunload', (e) => {
-  if (saveTimer) { clearTimeout(saveTimer); saveNow(); }
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; saveNow(); }
+  if (saveFailed) {
+    e.preventDefault();
+    e.returnValue = '';        // 浏览器会弹出「确认离开」提示
+  }
 });
 
 // ============ 启动 ============
