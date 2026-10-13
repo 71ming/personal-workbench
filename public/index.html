@@ -163,6 +163,16 @@
     border-style: solid; border-color: var(--accent);
     color: var(--accent); background: var(--accent-soft);
   }
+  /* 快捷键提示：放在显眼的地方，不然没人知道有快捷键 */
+  #hints {
+    padding: 9px 4px 1px; font-size: 11px; line-height: 1.7;
+    color: var(--text-mute); text-align: center;
+  }
+  #hints kbd {
+    font-family: inherit; font-size: 10.5px; color: var(--text-sub);
+    background: #f1f2f4; border: 1px solid #e4e6ea; border-radius: 4px;
+    padding: 0 4px;
+  }
 
   /* ---------- 右侧编辑器 ---------- */
   #editor { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--surface); }
@@ -287,6 +297,10 @@
       <div id="note-list"></div>
       <div class="sidebar-foot">
         <button id="new-note">＋ 新建笔记</button>
+        <div id="hints">
+          <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>
+          <kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭
+        </div>
       </div>
     </aside>
 
@@ -585,6 +599,41 @@ let searchTimer = null;
 searchEl.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => loadList(), 300);
+});
+
+// ============ 键盘快捷键 ============
+// 注意：Ctrl+N（浏览器新窗口）和 Ctrl+F（浏览器查找）是 Chrome 的保留键，
+// 网页拦不住，press 了也没用。所以这里换成一组网页能真正拦截的组合：
+//   Ctrl+Enter  新建笔记
+//   Ctrl+K      聚焦搜索框
+//   Ctrl+S      立刻保存
+//   Esc         逐层退出（取消删除确认 → 清空搜索 → 关闭编辑器）
+document.addEventListener('keydown', (e) => {
+  // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
+  if (e.key === 'Escape') {
+    if (confirmArmed) { disarmDelete(); return; }
+    if (searchEl.value) { searchEl.value = ''; loadList(); searchEl.blur(); return; }
+    if (currentId !== null) { closeEditor(); }
+    return;
+  }
+
+  if (!(e.ctrlKey || e.metaKey)) return;   // mac 上是 Cmd，这里一起支持
+
+  if (e.key === 'Enter') {                // 新建
+    e.preventDefault();
+    createNote();
+  } else if (e.key === 'k' || e.key === 'K') {   // 搜索
+    e.preventDefault();
+    searchEl.focus();
+    searchEl.select();
+  } else if (e.key === 's' || e.key === 'S') {   // 保存
+    e.preventDefault();
+    if (currentId !== null) {
+      clearTimeout(saveTimer);            // 取消待执行的自动保存，现在就存
+      saveTimer = null;
+      saveNow();
+    }
+  }
 });
 
 // 页面关闭前把没存完的内容补存一次；
