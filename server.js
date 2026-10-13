@@ -918,14 +918,29 @@ const AI_TEST_PROMPT =
 
 async function handleAiTest(req, res) {
   const cfg = readAiConfig();
-  const r = await callModel(cfg.provider, cfg.model, '你是一个只需要简短回答的助手。', AI_TEST_PROMPT);
-  if (!r.ok) return send(res, 200, { ...r, config: aiConfigPublic() });
 
-  // 如果对方认的模型名跟填的不一样，明确说出来。
-  // 这种情况不少见（厂商把小模型名映射到大模型），不提示的话
-  // 成本估算可能算在便宜的档上，实际却在按贵的收费。
-  const mismatch = r.returned_model && r.returned_model.toLowerCase() !== String(cfg.model).toLowerCase();
-  return send(res, 200, { ...r, mismatch, config: aiConfigPublic() });
+  // 这里必须用**页面上现在填着的**服务商和模型，不能一律读已保存的配置。
+  // 原因：「测试连接」最自然的用法就是「换个模型先试一下」，
+  // 而换模型只改了输入框、没点保存。要是这里只读磁盘上的配置，
+  // 测出来的永远是上一个模型，回执写「实际跑的模型 glm-5.3-flash」——
+  // 人只会以为「11 个模型怎么选都是这一个」，其实是自己填的名字压根没发出去。
+  // 没传就回落到已保存的配置，老的调用方式照样能用。
+  const body = await readBody(req);
+  const provider = String(body.provider ?? '').trim() || cfg.provider;
+  const model = String(body.model ?? '').trim() || cfg.model;
+
+  const r = await callModel(provider, model, '你是一个只需要简短回答的助手。', AI_TEST_PROMPT);
+  if (!r.ok) return send(res, 200, { ...r, tested_model: model, config: aiConfigPublic() });
+
+  // 判断「填的和实际跑的对不上」时，要拿**发出去的那个**名字比。
+  // 拿已保存的比是没用的：既然测试用的就是已保存的配置，
+  // 这两项本来就会相等，mismatch 永远不会亮。
+  // 这次修好之后，它才对得起注释里说的用途 ——
+  // 厂商把小模型名悄悄映射到大模型时给出警告，避免成本算低了。
+  const mismatch = r.returned_model && r.returned_model.toLowerCase() !== String(model).toLowerCase();
+
+  // tested_model 一起回传，好让界面能摆出「你填的」和「实际跑的」两个名字。
+  return send(res, 200, { ...r, mismatch, tested_model: model, config: aiConfigPublic() });
 }
 
 // ============ v3：问 AI（把勾选的笔记交给模型回答）===========

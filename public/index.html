@@ -3337,19 +3337,27 @@ $('ai-save').addEventListener('click', async () => {
 });
 
 // ---- 测试连接 ----
-// 这个按钮验证的是「**已经保存**的配置」能不能真的跑通，不是验证输入框里的内容。
+// 这个按钮验证的是「**输入框里现在填的**」服务商和模型能不能跑通，不用先保存。
+// （以前测的是已保存的配置，于是「换个模型先试一下」测出来的永远是上一个，
+//   回执写着「实际跑的模型 glm-5.3-flash」，看着像换不动，其实名字压根没发出去。）
 // 所以输入框里改了东西还没保存时，必须说清楚 —— 否则用户以为测的是新填的，
 // 实际测的是旧的，白排查半天。
 //
 // 它做的事：发一句最短的话（后端写死，不带任何笔记内容），然后把
 // 「通了没有 / 花了多少 token / 大概多少钱」如实报出来。
-async function aiTestConnection() {
+async function aiTestConnection(warnNote = '') {
   const btn = $('ai-test');
   const box = $('ai-test-box');
   btn.classList.add('loading');
 
   try {
-    const r = await api('/api/ai/test', { method: 'POST' });
+    // 把输入框里现在填的服务商和模型一起发过去，后端优先用这两个。
+    // 密钥不在这里发：调用器用的是服务端已保存的那份，所以没保存的密钥要另外提醒。
+    const reqBody = {
+      provider: $('ai-provider').value,
+      model: $('ai-model').value.trim(),
+    };
+    const r = await api('/api/ai/test', { method: 'POST', body: JSON.stringify(reqBody) });
 
     if (!r.ok) {
       box.className = 'ai-test-box fail';
@@ -3381,9 +3389,19 @@ async function aiTestConnection() {
     } else {
       rows.push(['大概花费', '这个模型的价格我没收录，只能报 token 数']);
     }
+    // 两个名字都摆出来。以前只显示「实际跑的」，
+    // 换了模型去测却还是显示上一个，看着就像「怎么选都是同一个」。
+    rows.push(['你填的模型', r.tested_model || '—']);
     rows.push(['实际跑的模型', r.returned_model || '—']);
 
     const notes = [];
+    if (warnNote) notes.push(warnNote);
+    // 这次测的模型跟已保存的不一样，说明用户还没点保存。
+    // 不说一声的话，他关掉弹窗就以为换好了。
+    if (r.tested_model && r.config && r.config.model
+        && r.tested_model.toLowerCase() !== String(r.config.model).toLowerCase()) {
+      notes.push('这次测的是输入框里的模型，还没保存。要一直用它的话点一下「保存配置」。');
+    }
     if (r.cost) notes.push(`价格查证于 ${r.cost.price_date}，实际以服务商账单为准${r.cost.note ? '；' + r.cost.note : ''}`);
     if (r.mismatch) notes.push('注意：你填的模型名和它实际跑的对不上，成本可能算低了');
     // 被截断是有信息量的 —— 静默截断会让人以为模型就这么点能耐
@@ -3404,15 +3422,14 @@ async function aiTestConnection() {
 }
 
 $('ai-test').addEventListener('click', () => {
-  // 有没保存的改动就提醒一句，免得白测
-  const typed = $('ai-key').value.trim();
-  if (typed) {
-    if (!confirm('输入框里的密钥还没保存。测试用的是「已保存的配置」。要先保存再测吗？')) return;
-    $('ai-save').click();
-    // 保存是异步的，这里先退出。等用户再点一次测试
-    return;
-  }
-  aiTestConnection();
+  // 直接测，不用先保存 —— 后端现在测的就是上面输入框里填的服务商和模型。
+  // 顺带把原来那个 confirm() 去掉了：它是阻塞式原生弹窗，会把整个页面卡住
+  //（删除按钮早就因为这个原因改成行内二次确认了，别再往回退）。
+  //
+  // 唯一的例外是密钥：密钥不进请求体，调用器用的是服务端已保存的那份。
+  // 所以输入框里还留着没保存的密钥时，得说清楚这次测的是哪一把。
+  const typedKey = $('ai-key').value.trim();
+  aiTestConnection(typedKey ? '输入框里的密钥还没保存，这次用的是已保存的那把。' : '');
 });
 
 // 「全部清除」要防手滑 —— 一次点击就把密钥和服务商都清掉，代价不小
