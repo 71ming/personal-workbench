@@ -841,6 +841,39 @@ function fmtTime(s) {
   return d.getFullYear() === now.getFullYear() ? `${ymd}` : ymd;  // 今年内不显示年份
 }
 
+// 「多久之前」—— 任务列表右上角那个时间用它。
+//
+// 换掉 fmtTime 的原因：那个位置显示的是**最后修改时间**，但格式是
+// 「21:19」/「昨天 10:00」/「2026-10-11」这种绝对时间，跟下面那个
+// 「10月25日截止」的标签摆在一起，用户会分不清上面那个是创建还是截止。
+// 改成相对时间就不用猜了 —— 「3 小时前」自己就说明这是新鲜度。
+//
+// 超过 30 天换回日期：那时候「43 天前」没有意义，你也想不起来是哪天。
+// 精确时间不丢，放在 title 里，鼠标悬停能看到。
+function fmtAgo(s) {
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d)) return s;
+  const min = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (min < 1) return '刚刚';                    // 含「时间在未来的」这种时钟偏差
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  const p = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 精确时间，给 title 用的（悬停看到完整年月日时分）。
+function fmtExact(s) {
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d)) return String(s);
+  const p = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} 最后修改`;
+}
+
 // 调用后端接口。失败时抛出带中文说明的错误，交给调用方处理。
 async function api(path, opts = {}) {
   let res;
@@ -1451,7 +1484,7 @@ function taskItemHtml(t) {
       <div class="task-main">
         <div class="item-head">
           <span class="t">${esc(listTitle(t.title))}</span>
-          <span class="d">${fmtTime(t.updated_at)}</span>
+          <span class="d" data-ago="${esc(t.updated_at)}" title="${esc(fmtExact(t.updated_at))}">${esc(fmtAgo(t.updated_at))}</span>
         </div>
         ${dueHtml}
       </div>
@@ -1472,6 +1505,20 @@ function renderTasks() {
   if (done.length) html += `<div class="list-sec"><b>已完成</b>${done.length}</div>` + done.map(taskItemHtml).join('');
   taskListEl.innerHTML = html;
 }
+
+// 相对时间会随时间变旧：一条 3 小时前的任务，页面开着一小时之后再去看，
+// 还写着「3 小时前」就是错的（它早就是 4 小时前了）。
+// 每分钟把这些文字重算一遍 —— 只改 textContent，不重新请求接口，很便宜。
+// 原始时间戳存在 data-ago 上，所以不用重新拉列表。
+function refreshTaskAgo() {
+  taskListEl.querySelectorAll('.d[data-ago]').forEach((el) => {
+    el.textContent = fmtAgo(el.dataset.ago);
+  });
+}
+setInterval(() => {
+  // 只在真的看得见的时候刷。搜索模式下 .d 是绝对时间（搜索结果不显示时间），不用管。
+  if (view === 'tasks' && !inSearchMode()) refreshTaskAgo();
+}, 60000);
 
 function setTaskSaveState(state, text) {
   taskStateEl.classList.remove('saving', 'saved');
