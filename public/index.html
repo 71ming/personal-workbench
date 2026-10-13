@@ -544,6 +544,11 @@
   .bm-fetch-bar .fetch-state { flex: 1 1 auto; min-width: 0; }
   .bm-fetch-btns { margin-left: auto; display: flex; gap: 8px; flex-shrink: 0; }
   .bm-sum-line { color: var(--text-mute); opacity: .85; }
+  /* 抓失败的收藏在列表里的红色小标记（完整原因放在 title 里悬停看） */
+  .bm-fetch-line {
+    margin-top: 3px; font-size: 11.5px; color: var(--danger);
+    display: inline-block; padding: 1px 6px; border-radius: 5px; background: #fdeeee;
+  }
   .fetch-state { font-size: 12.5px; color: var(--text-mute); }
   .fetch-state.ok { color: var(--ok, #177245); }
   .fetch-state.fail { color: var(--danger); }
@@ -758,6 +763,20 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// 「列表上显示的标题」。标题可以合法地是空字符串（你新建了但还没打字），
+// 直接渲染就是个空行，只剩右边一个时间戳 —— 夹在别的条目中间完全看不出是什么。
+// 所以凡是要显示标题的地方都过这个函数，空的给个占位。
+// 收藏多一层：空标题先试着用链接推一个（见 titleFromUrl），推不出才用占位。
+function listTitle(raw, url) {
+  const t = String(raw ?? '').trim();
+  if (t) return t;
+  if (url) {
+    const guess = titleFromUrl(url);
+    if (guess) return guess;
+  }
+  return '（无标题）';
+}
+
 // 把 "2026-10-13 15:04:05" 显示成好读的样子
 function fmtTime(s) {
   if (!s) return '';
@@ -844,7 +863,7 @@ function renderList() {
   listEl.innerHTML = notes.map((n) => `
     <div class="item ${n.id === currentId ? 'active' : ''}" data-id="${n.id}">
       <div class="item-head">
-        <span class="t">${esc(n.title)}</span>
+        <span class="t">${esc(listTitle(n.title))}</span>
         <span class="d">${fmtTime(n.updated_at)}</span>
       </div>
       <div class="snippet">${esc(n.body || '')}</div>
@@ -1382,7 +1401,7 @@ function taskItemHtml(t) {
               title="${isDone ? '恢复为待办' : '标记完成'}"></button>
       <div class="task-main">
         <div class="item-head">
-          <span class="t">${esc(t.title)}</span>
+          <span class="t">${esc(listTitle(t.title))}</span>
           <span class="d">${fmtTime(t.updated_at)}</span>
         </div>
         ${dueHtml}
@@ -1630,7 +1649,12 @@ function titleFromUrl(raw) {
   let u;
   try { u = new URL(String(raw).trim()); } catch { return ''; }
   const host = u.hostname.replace(/^www\./, '');
-  const seg = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+  // 路径末段解码成中文（维基百科那种 /wiki/%E7%91%9E... 解出来是「瑞克物理论」）。
+  // 但 decodeURIComponent 碰到残缺的百分号序列会直接抛异常 —— 比如 https://example.com/100%off
+  // 这种地址一粘贴进来就会让整个函数炸掉，所以这里必须单独兜住。
+  let seg = '';
+  try { seg = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || ''); }
+  catch { seg = u.pathname.split('/').filter(Boolean).pop() || ''; }   // 解不了就用原文，不比空强
   const tail = seg.replace(/[-_]+/g, ' ').trim();
   if (host && tail) return `${tail} · ${host}`;
   return host || '';
@@ -1668,12 +1692,23 @@ function renderBookmarks() {
   bookmarkListEl.innerHTML = bookmarks.map((b) => `
     <div class="item bm-item ${b.id === currentBookmarkId ? 'active' : ''}" data-id="${b.id}">
       <div class="item-head">
-        <span class="t">${esc(b.title)}</span>
+        <span class="t">${esc(listTitle(b.title, b.url))}</span>
         <span class="d">${fmtTime(b.updated_at)}</span>
       </div>
       <div class="bm-host-line">${esc(b.url)}</div>
       ${b.summary ? `<div class="bm-host-line bm-sum-line">${esc(b.summary.slice(0, 70))}${b.summary.length > 70 ? '…' : ''}</div>` : ''}
+      ${bmFailLine(b)}
     </div>`).join('');
+}
+
+// 抓失败的收藏，在列表里给个红色小标记。
+//
+// 为什么要加：编辑区里明明写着「没抓到：xxx」，但列表上完全看不出来，
+// 一条失败的和一条「刚存下还没来得及抓」长得一模一样 —— 扫一眼分不出哪些是真抓不到。
+// 这里只在失败时显示，鼠标悬停能看到完整原因（列表窄，塞不下整句话）。
+function bmFailLine(b) {
+  if (!b.fetch_error) return '';
+  return `<div class="bm-fetch-line" title="${esc(b.fetch_error)}">没抓到内容</div>`;
 }
 
 // ---------- 抓取状态和内容的显示 ----------
@@ -2019,7 +2054,7 @@ function renderSearchResults(keyword, data) {
     html += rNotes.map((n) => `
       <div class="item result-item" data-kind="note" data-id="${n.id}">
         <div class="item-head">
-          <span class="t">${mark(n.title, keyword)}</span>
+          <span class="t">${mark(listTitle(n.title), keyword)}</span>
           <span class="kind-tag">笔记</span>
         </div>
         <div class="snippet">${mark(n.body || '', keyword)}</div>
@@ -2035,7 +2070,7 @@ function renderSearchResults(keyword, data) {
       return `
       <div class="item result-item task-item ${isDone ? 'done' : ''}" data-kind="task" data-id="${t.id}">
         <div class="item-head">
-          <span class="t">${mark(t.title, keyword)}</span>
+          <span class="t">${mark(listTitle(t.title), keyword)}</span>
           <span class="kind-tag task">任务</span>
         </div>
         ${dueHtml}
@@ -2048,11 +2083,12 @@ function renderSearchResults(keyword, data) {
     html += rMarks.map((b) => `
       <div class="item result-item bm-item" data-kind="bookmark" data-id="${b.id}">
         <div class="item-head">
-          <span class="t">${mark(b.title, keyword)}</span>
+          <span class="t">${mark(listTitle(b.title, b.url), keyword)}</span>
           <span class="kind-tag bm">收藏</span>
         </div>
         <div class="bm-host-line">${mark(b.url, keyword)}</div>
         ${b.summary ? `<div class="bm-host-line bm-sum-line">${mark(b.summary.slice(0, 80), keyword)}${b.summary.length > 80 ? '…' : ''}</div>` : ''}
+        ${bmFailLine(b)}
       </div>`).join('');
   }
   searchResultsEl.innerHTML = html;

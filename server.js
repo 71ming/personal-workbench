@@ -169,6 +169,25 @@ function normUrl(v) {
   return s;
 }
 
+// 从网址里推出一个能看的标题，纯字符串处理，不发任何请求。
+// 跟前端 titleFromUrl() 是同一套逻辑，两边各留一份的原因和 normUrl/safeLink 一样：
+// 前端这个是为了输入框里实时提示，后端这个是为了导出时兜底 ——
+// 标题为空时直接写进 Markdown 会变成 `- [](https://…)`，那是**语法错误的链接**，
+// 在任何 Markdown 编辑器里都渲染不出来，等于这条收藏在备份里丢了。
+function titleFromUrl(raw) {
+  let u;
+  try { u = new URL(String(raw ?? '').trim()); } catch { return ''; }
+  const host = u.hostname.replace(/^www\./, '');
+  // 解码路径末段（维基百科那种 %E7%91%9E... 能解出中文），
+  // 但残缺的百分号序列会让 decodeURIComponent 直接抛异常，必须单独接住。
+  const lastSeg = u.pathname.split('/').filter(Boolean).pop() || '';
+  let seg = lastSeg;
+  try { seg = decodeURIComponent(lastSeg); } catch { /* 解不了就用原文，不比空强 */ }
+  const tail = seg.replace(/[-_]+/g, ' ').trim();
+  if (host && tail) return `${tail} · ${host}`;
+  return host || '';
+}
+
 // ============ v2.4：抓网页内容 ============
 // 零依赖，全部用 Node 自带的 fetch + 手写字符串处理。
 // 这一块和「存两条数据」完全不是一回事，所以单独一节。
@@ -456,7 +475,11 @@ function buildMarkdown() {
   if (marks.length) {
     lines.push(`# 收藏`, ``);
     for (const b of marks) {
-      lines.push(`- [${b.title.replace(/\s*\n\s*/g, ' ')}](${b.url})`);
+      // 标题为空是合法的（新建后没打字，或者从别处导入的脏数据）。
+      // 这里必须兜住：`- [](url)` 是坏掉的 Markdown，导出文件里等于这条收藏没了。
+      // 先试着用链接推一个，推不出就把链接本身当标题 —— 至少是合法链接，点得开。
+      const title = String(b.title || '').trim() || titleFromUrl(b.url) || b.url;
+      lines.push(`- [${title.replace(/\s*\n\s*/g, ' ')}](${b.url})`);
       if (b.summary) lines.push(`  > ${b.summary.replace(/\s*\n\s*/g, ' ')}`);
     }
     lines.push(``, `---`, ``);
