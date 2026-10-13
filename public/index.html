@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个人工作台</title>
+<style>
+  /* v1 样式：够用就好，不做主题切换 */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #1c1c1e; background: #f5f5f7; font-size: 14px;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- 顶部 ---------- */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px; background: #fff; border-bottom: 1px solid #e3e3e6;
+  }
+  header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  #search {
+    flex: 1; padding: 7px 12px; font-size: 14px;
+    border: 1px solid #d3d3d8; border-radius: 8px; background: #fbfbfd; outline: none;
+  }
+  #search:focus { border-color: #6a8cff; background: #fff; }
+
+  /* ---------- 主体两栏 ---------- */
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* 左侧列表 */
+  #sidebar {
+    width: 280px; flex-shrink: 0; display: flex; flex-direction: column;
+    background: #fff; border-right: 1px solid #e3e3e6;
+  }
+  #note-list { flex: 1; overflow-y: auto; }
+  .item {
+    padding: 10px 14px; border-bottom: 1px solid #f0f0f2; cursor: pointer;
+  }
+  .item:hover { background: #f7f8fa; }
+  .item.active { background: #eaf0ff; }
+  .item .t { font-weight: 600; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .d { color: #8a8a8e; font-size: 12px; }
+  .item .snippet { color: #5c5c61; font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #new-note {
+    margin: 10px; padding: 9px; font-size: 14px; cursor: pointer;
+    border: 1px solid #d3d3d8; border-radius: 8px; background: #fff;
+  }
+  #new-note:hover { background: #f0f0f2; }
+  .empty { padding: 20px 14px; color: #8a8a8e; text-align: center; }
+
+  /* 右侧编辑器 */
+  #editor { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #fff; }
+  #editor-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid #f0f0f2;
+  }
+  #save-state { color: #8a8a8e; font-size: 12px; margin-left: auto; }
+  button.danger {
+    padding: 6px 12px; cursor: pointer; border-radius: 8px;
+    border: 1px solid #e3c3c3; background: #fff; color: #c0392b;
+  }
+  button.danger:hover { background: #fdf3f2; }
+  /* 待确认状态：点过一次「删除」后变成红色实心，提醒用户再点一次 */
+  button.danger.armed { background: #c0392b; color: #fff; border-color: #c0392b; }
+  button.ghost {
+    padding: 6px 12px; cursor: pointer; border-radius: 8px;
+    border: 1px solid #d3d3d8; background: #fff; color: #5c5c61;
+  }
+  button.ghost:hover { background: #f0f0f2; }
+  #editor-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #a0a0a6; }
+  #edit-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  /* 显隐工具类。必须加 !important：#edit-pane / button.ghost 这类
+     ID 和「标签.类」选择器的特异性比 .hidden 高，不加会盖不住 display:flex。 */
+  .hidden { display: none !important; }
+  #title {
+    border: none; outline: none; padding: 16px 20px 10px;
+    font-size: 22px; font-weight: 700; font-family: inherit; background: transparent;
+  }
+  #body { flex: 1; border: none; outline: none; resize: none; padding: 0 20px 20px;
+    font-size: 15px; line-height: 1.7; font-family: inherit; background: transparent; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- 顶部：标题 + 全局搜索框 -->
+  <header>
+    <h1>个人工作台</h1>
+    <input id="search" type="search" placeholder="搜索标题和正文…">
+  </header>
+
+  <main>
+    <!-- 左侧：笔记列表 -->
+    <aside id="sidebar">
+      <div id="note-list"></div>
+      <button id="new-note">＋ 新建笔记</button>
+    </aside>
+
+    <!-- 右侧：编辑器 -->
+    <section id="editor">
+      <div id="editor-empty">从左边选一条笔记，或点「新建笔记」开始写</div>
+
+      <div id="edit-pane" class="hidden">
+        <div id="editor-head">
+          <span id="save-state">已保存</span>
+          <button class="ghost hidden" id="cancel-delete">取消</button>
+          <button class="danger" id="delete">删除</button>
+        </div>
+        <input id="title" placeholder="标题">
+        <textarea id="body" placeholder="正文…"></textarea>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+// ============ 全局状态 ============
+let notes = [];        // 当前列表数据
+let currentId = null;  // 正在编辑的笔记 id
+let saveTimer = null;  // 自动保存的防抖计时器
+
+// 常用元素
+const $ = (id) => document.getElementById(id);
+const listEl = $('note-list'), searchEl = $('search');
+const titleEl = $('title'), bodyEl = $('body'), stateEl = $('save-state');
+
+// ============ 小工具 ============
+// 把 HTML 特殊字符转义，防止笔记内容里的 < > 破坏页面
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// 把 "2026-10-13 15:04:05" 显示成好读的样子
+function fmtTime(s) {
+  if (!s) return '';
+  const d = new Date(s.replace(' ', 'T'));
+  if (isNaN(d)) return s;
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return `今天 ${hm}`;
+  const y = new Date(now); y.setDate(y.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `昨天 ${hm}`;
+  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return d.getFullYear() === now.getFullYear() ? `${ymd} ${hm}` : ymd;
+}
+
+// 调用后端接口
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!res.ok) throw new Error(`接口出错：${res.status}`);
+  return res.status === 204 ? null : res.json();
+}
+
+// ============ 列表 ============
+async function loadList(keyword = searchEl.value.trim()) {
+  const url = keyword ? `/api/notes?search=${encodeURIComponent(keyword)}` : '/api/notes';
+  notes = await api(url);
+  renderList();
+}
+
+function renderList() {
+  if (notes.length === 0) {
+    listEl.innerHTML = '<div class="empty">没有笔记</div>';
+    return;
+  }
+  listEl.innerHTML = notes.map((n) => `
+    <div class="item ${n.id === currentId ? 'active' : ''}" data-id="${n.id}">
+      <div class="t">${esc(n.title)}</div>
+      <div class="d">${fmtTime(n.updated_at)}</div>
+      <div class="snippet">${esc((n.body || '').slice(0, 40))}</div>
+    </div>`).join('');
+}
+
+// ============ 编辑 ============
+function openNote(id) {
+  const n = notes.find((x) => x.id === id);
+  if (!n) return;
+  disarmDelete();               // 换笔记时退出「待确认」，防止误删下一条
+  currentId = id;
+  titleEl.value = n.title;
+  bodyEl.value = n.body || '';
+  $('editor-empty').classList.add('hidden');
+  $('edit-pane').classList.remove('hidden');
+  stateEl.textContent = '已保存';
+  renderList();          // 高亮当前选中项
+  titleEl.focus();
+}
+
+function closeEditor() {
+  currentId = null;
+  $('edit-pane').classList.add('hidden');
+  $('editor-empty').classList.remove('hidden');
+  renderList();
+}
+
+// 立即保存当前笔记
+async function saveNow() {
+  if (currentId === null) return;
+  stateEl.textContent = '保存中…';
+  await api(`/api/notes/${currentId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title: titleEl.value, body: bodyEl.value }),
+  });
+  const t = new Date();
+  stateEl.textContent = `已保存 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+  await loadList();      // 刷新列表，让标题和更新时间同步
+}
+
+// 输入后自动保存（防抖 800ms：停止打字 0.8 秒才存）
+function scheduleSave() {
+  stateEl.textContent = '编辑中…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNow, 800);
+}
+
+async function createNote() {
+  const n = await api('/api/notes', {
+    method: 'POST',
+    body: JSON.stringify({ title: '无标题', body: '' }),
+  });
+  searchEl.value = '';         // 清掉搜索，保证新笔记在列表里可见
+  await loadList('');
+  openNote(n.id);
+}
+
+// ============ 事件绑定 ============
+// 点左侧列表某条 → 右侧载入
+listEl.addEventListener('click', (e) => {
+  const item = e.target.closest('.item');
+  if (item) openNote(Number(item.dataset.id));
+});
+
+// 点「新建笔记」
+$('new-note').addEventListener('click', createNote);
+
+// 标题和正文变化 → 自动保存
+titleEl.addEventListener('input', scheduleSave);
+bodyEl.addEventListener('input', scheduleSave);
+
+// 搜索框输入 → 实时过滤（防抖 300ms）
+let searchTimer = null;
+searchEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadList(), 300);
+});
+
+// 删除（要二次确认）
+// 第一次点：按钮变成红色的「确认删除？」，旁边冒出「取消」；再点一次才真的删。
+// 不用 confirm() 是因为它会阻塞整个页面，这里用行内确认更顺手，也不怕手滑。
+const delBtn = $('delete'), cancelBtn = $('cancel-delete');
+let confirmArmed = false;
+
+// 进入「待确认」状态
+function armDelete() {
+  confirmArmed = true;
+  delBtn.textContent = '确认删除？';
+  delBtn.classList.add('armed');
+  cancelBtn.classList.remove('hidden');
+}
+
+// 退出「待确认」状态（切换笔记时也会调用，避免状态串到别的笔记上）
+function disarmDelete() {
+  confirmArmed = false;
+  delBtn.textContent = '删除';
+  delBtn.classList.remove('armed');
+  cancelBtn.classList.add('hidden');
+}
+
+delBtn.addEventListener('click', async () => {
+  if (currentId === null) return;
+
+  if (!confirmArmed) { armDelete(); return; }   // 第一次点：只是进入待确认
+
+  disarmDelete();
+  await api(`/api/notes/${currentId}`, { method: 'DELETE' });
+  closeEditor();
+  await loadList();
+});
+
+cancelBtn.addEventListener('click', disarmDelete);
+
+// 页面关闭前把没存完的内容补存一次
+window.addEventListener('beforeunload', (e) => {
+  if (saveTimer) { clearTimeout(saveTimer); saveNow(); }
+});
+
+// ============ 启动 ============
+loadList();
+</script>
+</body>
+</html>
