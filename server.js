@@ -74,13 +74,9 @@ const tq = {
   allForExport: db.prepare("SELECT title,status,due_date,completed_at,created_at FROM tasks WHERE deleted_at IS NULL ORDER BY (status='done') ASC, (due_date IS NULL) ASC, due_date ASC"),
 };
 
-// ============ v2.3 新增：收藏（还是独立的表） ============
+// ============ 收藏：独立的表 ============
 // 继续守「一张表一个概念」。收藏存的是「一个链接 + 我对它的称呼」，
 // 不是笔记也不是任务，不和它们混在一起。
-//
-// 这一版刻意**不联网**：只存链接和标题。
-// 「自动抓正文和摘要」是下一步的事，它牵扯超时、重试、反爬，
-// 和「存两条数据」完全不是一回事，分开做才稳。
 db.exec(`
   CREATE TABLE IF NOT EXISTS bookmarks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,16 +88,53 @@ db.exec(`
   );
 `);
 
+// v2.4 迁移：自动抓正文和摘要要存东西。跟 notes 一样，先查表结构再补列，
+// 跑多少次都安全，老库第一次启动会自动升级。
+const bmCols = db.prepare('PRAGMA table_info(bookmarks)').all().map(c => c.name);
+for (const [name, ddl] of [
+  ['content',    "ALTER TABLE bookmarks ADD COLUMN content TEXT NOT NULL DEFAULT ''"],   // 抓下来的正文（纯文本）
+  ['summary',    "ALTER TABLE bookmarks ADD COLUMN summary TEXT NOT NULL DEFAULT ''"],   // 一两句话的摘要
+  ['fetched_at', "ALTER TABLE bookmarks ADD COLUMN fetched_at TEXT"],                     // 上次成功抓取的时间
+  ['fetch_error',"ALTER TABLE bookmarks ADD COLUMN fetch_error TEXT"],                    // 上次抓失败的原因
+]) {
+  if (!bmCols.includes(name)) {
+    db.exec(ddl);
+    console.log('已升级数据库：bookmarks 新增 ' + name + ' 字段');
+  }
+}
+
+// 列表里带上 summary（列表上要显示一行）和 content（编辑区要显示正文）。
+// 正文最多 20KB，几十条收藏也就几百 KB，本地服务扛得住，换来的是前端一次请求就能显示全部。
+const BM_FIELDS = 'id,url,title,summary,content,fetched_at,fetch_error,created_at,updated_at';
+
 const bmq = {
-  list:   db.prepare('SELECT id,url,title,created_at,updated_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY updated_at DESC'),
-  // 标题和链接都能搜到：有时你记得住的是「哪个网站」，想不起标题
-  search: db.prepare('SELECT id,url,title,created_at,updated_at FROM bookmarks WHERE deleted_at IS NULL AND (title LIKE ? OR url LIKE ?) ORDER BY updated_at DESC'),
+  list:   db.prepare(`SELECT ${BM_FIELDS} FROM bookmarks WHERE deleted_at IS NULL ORDER BY updated_at DESC`),
+  // 标题、链接、正文、摘要都能搜到：
+  // 有时你只记得「那篇文章里写过什么」，想不起标题也记不清在哪个站。
+  search: db.prepare(`SELECT ${BM_FIELDS} FROM bookmarks WHERE deleted_at IS NULL
+                      AND (title LIKE ? OR url LIKE ? OR content LIKE ? OR summary LIKE ?)
+                      ORDER BY updated_at DESC`),
   get:     db.prepare('SELECT * FROM bookmarks WHERE id = ?'),
   create:  db.prepare('INSERT INTO bookmarks (url,title) VALUES (?,?)'),
-  update:  db.prepare("UPDATE bookmarks SET url=?, title=?, updated_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  // 改链接等于换了内容，旧的正文/摘要立刻作废，否则会出现「链接是 A、内容是 B」。
+  update:  db.prepare(`UPDATE bookmarks SET url=?, title=?,
+                         content=CASE WHEN url<>? THEN '' ELSE content END,
+                         summary=CASE WHEN url<>? THEN '' ELSE summary END,
+                         fetched_at=CASE WHEN url<>? THEN NULL ELSE fetched_at END,
+                         fetch_error=CASE WHEN url<>? THEN NULL ELSE fetch_error END,
+                         updated_at=datetime('now','localtime')
+                       WHERE id=? AND deleted_at IS NULL`),
+  // 抓取成功后写回：标题只在「原来就是自动生成的」时才替换，用户自己起的名字不许动。
+  applyFetch: db.prepare(`UPDATE bookmarks SET title=?, content=?, summary=?,
+                          fetched_at=datetime('now','localtime'), fetch_error=NULL,
+                          updated_at=datetime('now','localtime')
+                        WHERE id=? AND deleted_at IS NULL`),
+  // 只写失败原因，不动标题和正文
+  markFetchFail: db.prepare("UPDATE bookmarks SET fetch_error=?, updated_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  clearFetch: db.prepare("UPDATE bookmarks SET content='', summary='', fetched_at=NULL, fetch_error=NULL WHERE id=? AND deleted_at IS NULL"),
   softDel: db.prepare("UPDATE bookmarks SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
   restore: db.prepare('UPDATE bookmarks SET deleted_at=NULL WHERE id=?'),
-  allForExport: db.prepare('SELECT url,title,created_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY created_at ASC'),
+  allForExport: db.prepare('SELECT url,title,summary,created_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY created_at ASC'),
 };
 
 // 软删除：不真删，只打一个删除时间戳，撤销就是把时间戳清空。
@@ -134,6 +167,226 @@ function normUrl(v) {
   if (!/^https?:\/\//i.test(s)) return null;
   try { new URL(s); } catch { return null; }   // 再让内置解析器验一次格式
   return s;
+}
+
+// ============ v2.4：抓网页内容 ============
+// 零依赖，全部用 Node 自带的 fetch + 手写字符串处理。
+// 这一块和「存两条数据」完全不是一回事，所以单独一节。
+//
+// —— 安全：为什么必须拦内网地址 ——
+// 这个服务会替你去访问用户给的任意网址。如果没有这道拦截，
+// 粘一条 http://127.0.0.1:8787/api/notes 就能让服务把自己数据库里的笔记读出来；
+// 粘 http://169.254.169.254/ 还能碰到云主机的元数据接口。
+// 单机小工具也一样要拦，不然「贴个链接」就等于开了一条内网通道。
+function isPrivateHost(hostname) {
+  const h = String(hostname).toLowerCase().replace(/^\[|\]$/g, '');   // 去 IPv6 的方括号
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;  // IPv6 内网
+  // IPv4：按四段数字判断，别用字符串前缀（10.0.0.1 是内网，100.64.0.1 不是）
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 127) return true;                 // 回环
+  if (a === 10) return true;                  // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
+  if (a === 192 && b === 168) return true;    // 192.168.0.0/16
+  if (a === 169 && b === 254) return true;    // 链路本地（含云元数据 169.254.169.254）
+  if (a === 0) return true;                   // 0.0.0.0/8「本机」
+  return false;
+}
+
+// HTTP 实体反转义。网页里的 &amp; &nbsp; &#39; 这些不解出来，正文会脏。
+const ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ensp: ' ', emsp: ' ',
+  mdash: '—', ndash: '–', hellip: '…', ldquo: '“', rdquo: '”', lsquo: '‘', rsquo: '’', middot: '·',
+};
+function decodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, g) => {
+    if (g[0] === '#') {
+      const n = g[1] === 'x' || g[1] === 'X' ? parseInt(g.slice(2), 16) : parseInt(g.slice(1), 10);
+      // 转成码点再转成字符；非法码点直接丢掉，免得打出乱码控制符
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '';
+    }
+    const v = ENTITIES[g.toLowerCase()];
+    return v === undefined ? m : v;
+  });
+}
+
+// 有些页面要登录才看得到内容。我们这边不带 cookie（也不该带，见下），
+// 抓回来的其实是登录框。这种结果必须**当成失败**处理：
+// 不然标题会被改成「登录 XXX」，正文变成一堆登录按钮，比不抓还糟。
+//
+// 判断条件写保守点，只在「页面很短」时才下结论 ——
+// 一篇专门讲登录/密码的文章也会命中关键词，但它正文很长，不会被误判。
+//
+// 为什么不去存 cookie：那就等于在你的数据库里存网站登录凭据，
+// 泄露风险和「记密码」是一个级别的事。真要支持「登录过的页面」，
+// 应该做成独立功能单独评估，不该顺手塞进收藏里。
+function looksLikeLoginWall(html, content, title) {
+  if (content.length > 1200) return false;
+  const hasPasswordBox = /<input[^>]+type=["']?password/i.test(html);
+  const kw = /(登录|请先登录|需要登录|尚未登录|sign\s?in|log\s?in)/i;
+  return hasPasswordBox || (kw.test(title) && kw.test(content));
+}
+
+// 判断一个标题是不是「我们自己按网址拼出来的那个自动标题」。
+// 只有这种标题才允许被抓回来的网页真标题替换掉 —— 用户自己起的名字一个字都不能动。
+function isAutoTitle(title, url) {
+  const t = String(title || '').trim();
+  if (!t) return true;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    if (t === host || t.endsWith(' · ' + host)) return true;
+    // 还有一种「自动」情况：标题整个就是链接本身。
+    // 新建时如果没填标题，后端会用链接兜底当标题显示，
+    // 这种也算自动生成的，应该允许被网页真标题替换。
+    const bare = (s) => String(s).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    return bare(t) === bare(u.toString()) || bare(t) === bare(u.hostname + u.pathname);
+  } catch { return false; }
+}
+
+// 从 HTML 里抠出「标题 / 描述 / 正文」。没有第三方解析器可用，
+// 所以走最朴素但够稳的一条路：先扔掉不该看的块，再把剩下的标签换成换行，最后收空白。
+const DROP_BLOCKS = 'script|style|noscript|svg|iframe|head|nav|header|footer|aside|form|template|noscript';
+function extractFromHtml(html, baseUrl) {
+  const text = String(html);
+
+  // 标题：og:title（网站自己声明的，最准）→ <title>
+  let title = '';
+  const og = text.match(/<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']*)["']/i)
+          || text.match(/<meta[^>]+content=["']([^"']*)["'][^>]*property=["']og:title["']/i);
+  if (og) title = og[1];
+  if (!title) {
+    const t = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) title = t[1];
+  }
+  title = decodeEntities(title).replace(/\s+/g, ' ').trim().slice(0, 200);
+
+  // 描述：og:description → meta[name=description]
+  let summary = '';
+  const ogd = text.match(/<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']*)["']/i)
+           || text.match(/<meta[^>]+content=["']([^"']*)["'][^>]*property=["']og:description["']/i);
+  if (ogd) summary = ogd[1];
+  if (!summary) {
+    const d = text.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["']/i)
+           || text.match(/<meta[^>]+content=["']([^"']*)["'][^>]*name=["']description["']/i);
+    if (d) summary = d[1];
+  }
+  summary = decodeEntities(summary).replace(/\s+/g, ' ').trim();
+
+  // 正文
+  let body = text
+    .replace(/<!--[\s\S]*?-->/g, '')                      // 注释
+    .replace(new RegExp(`<(${DROP_BLOCKS})\\b[\\s\\S]*?</\\1>`, 'gi'), '\n')
+    .replace(new RegExp(`<(${DROP_BLOCKS})\\b[^>]*/?>`, 'gi'), '')   // 没闭合的空标签
+    .replace(/<(br|hr)\s*\/?>/gi, '\n')
+    // 这些标签在版面上就是「另起一行」，换成换行符比全塞进一行好读得多
+    .replace(/<\/?(p|div|li|tr|h[1-6]|section|article|blockquote|pre|td|dd|dt|figcaption)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');                            // 剩下的标签全删
+  body = decodeEntities(body);
+
+  const lines = body.split('\n').map(s => s.replace(/\s+/g, ' ').trim())
+    .filter(s => s.length > 1)          // 丢掉只剩标点的碎行
+    .filter(s => !/^[\s|·•\-–—*_=›»→]+$/.test(s));  // 丢掉纯装饰线
+  let content = lines.join('\n');
+
+  if (content.length > 20000) content = content.slice(0, 20000) + '\n…（正文太长，已截断）';
+
+  // 摘要：网页没写 description 就拿正文开头，截在句号/换行处，别拦腰截半句话
+  if (!summary && content) {
+    const head = content.split('\n')[0].slice(0, 200);
+    const cut = Math.max(head.lastIndexOf('。'), head.lastIndexOf('.'), head.lastIndexOf('！'), head.lastIndexOf('？'));
+    summary = (cut > 30 ? head.slice(0, cut + 1) : head).trim();
+  }
+  if (summary.length > 300) summary = summary.slice(0, 300) + '…';
+
+  return { title, summary, content };
+}
+
+// 抓一个网址。手动处理重定向（每跳一次都重新验一次是不是内网），
+// 限制读取体积，8 秒超时，网络错误和 5xx 重试一次。
+const FETCH_TIMEOUT = 8000;
+const MAX_BYTES = 2 * 1024 * 1024;   // 2MB：正文用不了这么多，超了直接放弃
+
+async function fetchPage(startUrl) {
+  let target = startUrl;
+  for (let hop = 0; hop <= 5; hop++) {
+    const u = new URL(target);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('只支持 http/https');
+    if (isPrivateHost(u.hostname)) throw new Error('不抓内网地址（' + u.hostname + '）');
+
+    const res = await fetch(target, {
+      redirect: 'manual',                       // 自己跟，便于每跳都验一次
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      headers: {
+        // 老实报自己是本地小工具，别装成浏览器（很多站会直接拒绝假的 UA）
+        'user-agent': 'PersonalWorkbench/1.0 (local bookmark fetcher)',
+        accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5',
+      },
+    });
+
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      target = new URL(res.headers.get('location'), target).toString();
+      continue;                                  // 继续循环，重新做内网检查
+    }
+    if (!res.ok) {
+      const e = new Error('对方返回 ' + res.status + (res.statusText ? ' ' + res.statusText : ''));
+      e.retryable = res.status >= 500 || res.status === 429;   // 4xx 是我们自己不该重试
+      throw e;
+    }
+
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (!/text\/html|text\/plain|application\/xhtml/.test(ct)) {
+      throw new Error('不是网页（' + (ct.split(';')[0] || '未知类型') + '）');
+    }
+
+    // 边读边累计，超了就掐断 —— 不然一个 200MB 的文件能把内存吃满
+    const reader = res.body.getReader();
+    const chunks = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        if (size > MAX_BYTES) { await reader.cancel(); throw new Error('网页太大（超过 2MB），已放弃'); }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+
+    const buf = Buffer.concat(chunks);
+    // 少数老站点还是 GBK/GB2312，按响应头声明的编码解，解不了就当 UTF-8
+    const cs = (ct.match(/charset=([\w-]+)/) || [])[1] || 'utf-8';
+    let html;
+    try { html = new TextDecoder(cs, { fatal: false }).decode(buf); }
+    catch { html = new TextDecoder('utf-8', { fatal: false }).decode(buf); }
+
+    return { html, finalUrl: target };
+  }
+  throw new Error('重定向跳的次数太多');
+}
+
+async function fetchBookmarkContent(url) {
+  let lastErr;
+  // 只重试一次，而且**超时不再重试**：
+  // 8 秒都没回应的站点，多等一轮只是让用户对着转圈多生 8 秒的气。
+  // 值得重试的是「连接被拒 / DNS 抖动」这类瞬时错误。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetchPage(url);
+    } catch (e) {
+      lastErr = e;
+      const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      if (e.retryable === false || timedOut) break;
+    }
+  }
+  const msg = lastErr?.name === 'TimeoutError' || lastErr?.name === 'AbortError'
+    ? `超时（${FETCH_TIMEOUT / 1000} 秒没响应）`
+    : (lastErr?.message || '抓取失败');
+  throw new Error(msg);
 }
 
 const send = (res, code, data) => {
@@ -199,10 +452,12 @@ function buildMarkdown() {
 
   // 收藏用最朴素的「- [标题](链接)」，任何编辑器点得开。
   // URL 存进来之前已经被 normUrl 验过是 http/https 了，这里不用再担心协议。
+  // 抓到摘要的就在下面缩进一行；没抓到就只一行，输出和抓取功能上线前完全一样。
   if (marks.length) {
     lines.push(`# 收藏`, ``);
     for (const b of marks) {
-      lines.push(`- [${b.title}](${b.url})`);
+      lines.push(`- [${b.title.replace(/\s*\n\s*/g, ' ')}](${b.url})`);
+      if (b.summary) lines.push(`  > ${b.summary.replace(/\s*\n\s*/g, ' ')}`);
     }
     lines.push(``, `---`, ``);
   }
@@ -231,10 +486,10 @@ function handleSearch(res, keyword) {
   const kw = `%${s}%`;
   return send(res, 200, {
     keyword: s,
-    // 复用已经测过的查询：笔记搜标题和正文，任务搜标题，收藏搜标题和链接
+    // 复用已经测过的查询：笔记搜标题和正文，任务搜标题，收藏搜标题/链接/摘要/正文
     notes: q.search.all(kw, kw),
     tasks: tq.search.all(kw),
-    bookmarks: bmq.search.all(kw, kw),
+    bookmarks: bmq.search.all(kw, kw, kw, kw),
   });
 }
 
@@ -353,7 +608,7 @@ async function api(req, res, url) {
   // 收藏列表 / 搜索
   if (req.method === 'GET' && url.pathname === '/api/bookmarks') {
     const s = url.searchParams.get('search')?.trim();
-    if (s) return send(res, 200, bmq.search.all(`%${s}%`, `%${s}%`));
+    if (s) return send(res, 200, bmq.search.all(`%${s}%`, `%${s}%`, `%${s}%`, `%${s}%`));
     return send(res, 200, bmq.list.all());
   }
 
@@ -381,9 +636,44 @@ async function api(req, res, url) {
       if (!cur || cur.deleted_at) return send(res, 404, { error: 'not found' });
       const { url = cur.url, title = '' } = await readBody(req);
       const u = normUrl(url) || cur.url;      // 链接改坏了就保留原来的，别把收藏弄废
-      bmq.update.run(u, title.trim() || u, id);
+      // 后面 4 个 u 是给「链接变了就把正文/摘要清掉」那几个 CASE WHEN 用的
+      bmq.update.run(u, title.trim() || u, u, u, u, u, id);
       return send(res, 200, bmq.get.get(id));
     }
+
+    // ---------- v2.4：抓内容（自动 + 手动重试都走这一个接口） ----------
+    // 刻意做成「前端来调」而不是「保存时后端顺手抓」：
+    // 后端顺手抓会让保存接口被一个 8 秒的网络请求卡住，
+    // 对方站点慢一点，你连「保存链接」都要干等。
+    if (req.method === 'POST' && seg[3] === 'fetch') {
+      const cur = bmq.get.get(id);
+      if (!cur || cur.deleted_at) return send(res, 404, { error: 'not found' });
+      try {
+        const { html } = await fetchBookmarkContent(cur.url);
+        const picked = extractFromHtml(html, cur.url);
+        // 抓到的是登录框 → 算失败，保留原来的标题和正文
+        if (looksLikeLoginWall(html, picked.content, picked.title)) {
+          throw new Error('这个页面要登录才能看，抓到的是登录页');
+        }
+        // 只在「原来的标题就是自动生成的那个」时才换成网页真标题。
+        // 判断依据：标题为空，或者标题长得就像我们自动拼的（末段 · 域名）。
+        // 用户自己起的名字永远不动。
+        const auto = isAutoTitle(cur.title, cur.url);
+        const newTitle = (picked.title && auto) ? picked.title : cur.title;
+        bmq.applyFetch.run(newTitle || cur.title, picked.content, picked.summary, id);
+        return send(res, 200, bmq.get.get(id));
+      } catch (e) {
+        // 抓不到不算错误操作：链接照样存着，只是没内容。记下原因给用户点重试。
+        bmq.markFetchFail.run(e.message || '抓取失败', id);
+        return send(res, 200, { ...bmq.get.get(id), fetch_error: e.message || '抓取失败' });
+      }
+    }
+
+    if (req.method === 'DELETE' && seg[3] === 'fetch') {   // 丢掉已抓到的内容（换链接前的「手动重来」）
+      bmq.clearFetch.run(id);
+      return send(res, 200, bmq.get.get(id));
+    }
+
     if (req.method === 'POST' && seg[3] === 'restore') {
       bmq.restore.run(id);
       const b = bmq.get.get(id);

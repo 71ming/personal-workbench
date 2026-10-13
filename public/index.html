@@ -237,6 +237,8 @@
     transition: all .15s;
   }
   .btn:hover { background: #f4f5f7; color: var(--text); }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn:disabled:hover { background: none; color: inherit; }
   button.danger:hover { background: #fdf2f2; border-color: #f3c9cb; color: var(--danger); }
   /* 待确认状态：变红实心，明确告诉用户「再点一次才真删」 */
   button.danger.armed { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 500; }
@@ -531,6 +533,40 @@
   .bm-hint { margin-top: 18px; font-size: 12.5px; line-height: 1.7; color: var(--text-mute); }
   .bm-hint.bad { color: var(--danger); }
 
+  /* ---- 抓取状态和抓回来的内容 ---- */
+  .bm-fetch-row { margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--line); }
+  /* 状态文字可能很长（失败原因是一整句话），所以让它自己占一行 / 自己换行，
+     两个按钮打成一个组整体靠右 —— 否则按钮会被文字挤得竖排一列 */
+  .bm-fetch-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--line);
+  }
+  .bm-fetch-bar .fetch-state { flex: 1 1 auto; min-width: 0; }
+  .bm-fetch-btns { margin-left: auto; display: flex; gap: 8px; flex-shrink: 0; }
+  .bm-sum-line { color: var(--text-mute); opacity: .85; }
+  .fetch-state { font-size: 12.5px; color: var(--text-mute); }
+  .fetch-state.ok { color: var(--ok, #177245); }
+  .fetch-state.fail { color: var(--danger); }
+  .fetch-state.loading::after {
+    content: ''; display: inline-block; width: 9px; height: 9px; margin-left: 7px;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: bm-spin .7s linear infinite; vertical-align: -1px;
+  }
+  @keyframes bm-spin { to { transform: rotate(360deg); } }
+  .bm-content { margin-top: 14px; }
+  .bm-summary {
+    font-size: 13.5px; line-height: 1.75; color: var(--text);
+    background: var(--bg-soft, #f6f7f9); border-left: 3px solid var(--accent, #2f6feb);
+    padding: 10px 12px; border-radius: 0 4px 4px 0;
+  }
+  .bm-summary:empty { display: none; }
+  .bm-text {
+    margin-top: 10px; max-height: 320px; overflow-y: auto;
+    font-size: 13px; line-height: 1.85; color: var(--text-dim, #3c4148);
+    white-space: pre-wrap; word-break: break-word;
+    padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: #fff;
+  }
+
 </style>
 </head>
 <body>
@@ -677,8 +713,21 @@
                target="_blank" rel="noopener noreferrer">打开链接 ↗</a>
           </div>
           <p class="bm-hint" id="bookmark-hint">
-            标题可以留空，会用网址自动生成一个。这一版不联网抓取正文，想存摘要的话在标题里带几个关键词就行。
+            标题可以留空，会用网址自动生成一个。存好之后会自己去把网页的标题和正文抓回来。
           </p>
+
+          <!-- 抓取状态 + 抓回来的内容 -->
+          <div class="bm-fetch-bar">
+            <span class="fetch-state" id="bookmark-fetch-state"></span>
+            <span class="bm-fetch-btns">
+              <button class="btn hidden" id="bookmark-toggle-content">查看正文</button>
+              <button class="btn" id="bookmark-refetch">重新抓取</button>
+            </span>
+          </div>
+          <div class="bm-content hidden" id="bookmark-content">
+            <p class="bm-summary" id="bookmark-summary"></p>
+            <div class="bm-text" id="bookmark-text"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -1544,6 +1593,25 @@ const bmUrlEl = $('bookmark-url'), bmTitleEl = $('bookmark-title');
 const bmHostEl = $('bookmark-host'), bmOpenEl = $('bookmark-open');
 const bmHintEl = $('bookmark-hint'), bmStateEl = $('bookmark-state');
 const bmDelBtn = $('bookmark-delete'), bmCancelBtn = $('bookmark-cancel');
+const bmFetchStateEl = $('bookmark-fetch-state'), bmRefetchBtn = $('bookmark-refetch');
+const bmContentEl = $('bookmark-content'), bmSummaryEl = $('bookmark-summary'), bmTextEl = $('bookmark-text');
+const bmToggleBtn = $('bookmark-toggle-content');
+let bmFetching = false;          // 正在抓，别重复触发
+let bmShowFullText = false;      // 正文是折叠还是展开
+
+// 这个标题是「我们按网址自动拼的」还是「用户自己打的」。
+// 只有自动的才允许被网页抓回来的真标题替换掉（后端也做同样的判断，两边都挡一道）。
+function isAutoTitle(title, url) {
+  const t = String(title || '').trim();
+  if (!t) return true;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    if (t === host || t.endsWith(' · ' + host)) return true;
+    const bare = (s) => String(s).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    return bare(t) === bare(u.toString());
+  } catch { return false; }
+}
 
 // 只放行 http/https。后端入库前已经验过一遍，这里再验一次是「保险」：
 // 免得以后数据从别的口子进来（比如将来做导入），点一下就执行脚本。
@@ -1587,6 +1655,7 @@ async function loadBookmarks(keyword = searchEl.value.trim()) {
   hideBanner();
   syncListVisibility();
   renderBookmarks();
+  renderBookmarkContent();     // 列表刷新了，正在看的那条的状态/内容也要跟着更新
 }
 
 function renderBookmarks() {
@@ -1602,7 +1671,84 @@ function renderBookmarks() {
         <span class="d">${fmtTime(b.updated_at)}</span>
       </div>
       <div class="bm-host-line">${esc(b.url)}</div>
+      ${b.summary ? `<div class="bm-host-line bm-sum-line">${esc(b.summary.slice(0, 70))}${b.summary.length > 70 ? '…' : ''}</div>` : ''}
     </div>`).join('');
+}
+
+// ---------- 抓取状态和内容的显示 ----------
+function renderBookmarkContent() {
+  const b = bookmarks.find((x) => x.id === currentBookmarkId);
+  const cls = ['fetch-state'];
+  let text = '';
+
+  if (!b) {
+    bmContentEl.classList.add('hidden');
+    bmFetchStateEl.textContent = '';
+    bmRefetchBtn.classList.add('hidden');
+    bmToggleBtn.classList.add('hidden');
+    return;
+  }
+
+  bmRefetchBtn.classList.remove('hidden');
+  bmRefetchBtn.textContent = bmFetching ? '抓取中…' : '重新抓取';
+  bmRefetchBtn.disabled = bmFetching;      // 抓的过程中别让人反复点
+
+  if (bmFetching) {
+    cls.push('loading');
+    text = '正在打开这个网页…';
+  } else if (b.fetch_error) {
+    cls.push('fail');
+    text = `没抓到：${b.fetch_error}`;
+  } else if (b.fetched_at) {
+    cls.push('ok');
+    text = `已抓取（${b.fetched_at.slice(5, 16)}）`;
+  } else {
+    text = '还没抓取';
+  }
+  bmFetchStateEl.className = cls.join(' ');
+  bmFetchStateEl.textContent = text;
+
+  const has = !!(b.summary || b.content);
+  bmContentEl.classList.toggle('hidden', !has);
+  bmSummaryEl.textContent = b.summary || '';
+  bmTextEl.textContent = b.content || '';
+  bmToggleBtn.classList.toggle('hidden', !has || !(b.content && b.content !== b.summary));
+  bmToggleBtn.textContent = bmShowFullText ? '收起正文' : '查看正文';
+  bmTextEl.style.display = bmShowFullText ? '' : 'none';
+}
+
+// 真的去抓一次。手动点「重新抓取」和保存后自动抓，都走这一个函数。
+async function runFetch(id, manual) {
+  if (bmFetching) return;
+  bmFetching = true;
+  renderBookmarkContent();
+  try {
+    const b = await api(`/api/bookmarks/${id}/fetch`, { method: 'POST' });
+    // 后端只在「原标题是自动生成的」时才换标题；这边再确认一次输入框里的
+    // 标题没被用户手改过，才把新标题写回输入框（避免覆盖你正在打的字）。
+    if (b.title && b.title !== bmTitleEl.value && autoTitle && bmTitleEl.value === autoTitle) {
+      bmTitleEl.value = b.title;
+      autoTitle = b.title;
+      await api(`/api/bookmarks/${id}`, { method: 'PUT', body: JSON.stringify({ url: b.url, title: b.title }) });
+    }
+    // 抓失败不算错误：链接好好存着，只是没内容。红色提示一下就够了。
+    if (b.fetch_error && manual) showBanner(`没抓到内容：${b.fetch_error}`);
+  } catch (e) {
+    showBanner(`抓取没成功：${e.message}`);
+  } finally {
+    bmFetching = false;
+    await loadBookmarks();
+    renderBookmarkContent();
+  }
+}
+
+// 保存完顺手自动抓一次。条件是「从没抓过」：
+// 抓失败的不自动重试（否则你每改一个字标题就重抓一次），
+// 抓成功过的更不重抓。要重来就点「重新抓取」。
+function maybeAutoFetch(b) {
+  if (!b || currentBookmarkId === null) return;
+  if (b.fetched_at || b.fetch_error) return;
+  runFetch(b.id, false);
 }
 
 function setBookmarkSaveState(state, text) {
@@ -1618,7 +1764,7 @@ function syncBookmarkFields() {
   bmUrlEl.classList.toggle('bad', !!raw && !ok);
   if (!raw) {
     bmHintEl.className = 'bm-hint';
-    bmHintEl.textContent = '标题可以留空，会用网址自动生成一个。这一版不联网抓取正文，想存摘要的话在标题里带几个关键词就行。';
+    bmHintEl.textContent = '标题可以留空，会用网址自动生成一个。存好之后会自己去把网页的标题和正文抓回来。';
   } else if (!ok) {
     bmHintEl.className = 'bm-hint bad';
     bmHintEl.textContent = '这不像一个能打开的网址。必须以 http:// 或 https:// 开头。';
@@ -1640,12 +1786,16 @@ function openBookmark(id) {
   currentBookmarkId = id;
   bmUrlEl.value = b.url;
   bmTitleEl.value = b.title;
-  autoTitle = '';                       // 打开的是已存的收藏，标题算用户自己定的
+  // 打开已存的收藏时判断一下：标题要还是「自动生成的那种」，
+  // 后面抓到网页真标题才允许替换（用户自己起的名字一个字都不动）。
+  autoTitle = isAutoTitle(b.title, b.url) ? b.title : '';
+  bmShowFullText = false;
   $('bookmark-empty').classList.add('hidden');
   $('bookmark-edit').classList.remove('hidden');
   setBookmarkSaveState('saved', '已保存');
   syncBookmarkFields();
   renderBookmarks();
+  renderBookmarkContent();
   bmTitleEl.focus();
 }
 
@@ -1656,18 +1806,22 @@ function openNewBookmark() {
   bmUrlEl.value = '';
   bmTitleEl.value = '';
   autoTitle = '';
+  bmShowFullText = false;
   $('bookmark-empty').classList.add('hidden');
   $('bookmark-edit').classList.remove('hidden');
   setBookmarkSaveState('', '还没存');
   syncBookmarkFields();
+  renderBookmarkContent();      // 新收藏还没链接，抓取按钮先藏起来
   bmUrlEl.focus();
 }
 
 function closeBookmarkEditor() {
   currentBookmarkId = null;
+  bmFetching = false;
   $('bookmark-edit').classList.add('hidden');
   $('bookmark-empty').classList.remove('hidden');
   renderBookmarks();
+  renderBookmarkContent();
 }
 
 async function saveBookmarkNow() {
@@ -1680,16 +1834,20 @@ async function saveBookmarkNow() {
   }
   setBookmarkSaveState('saving', '保存中…');
   const payload = JSON.stringify({ url: u, title: bmTitleEl.value });
+  let saved = null;
   try {
     if (currentBookmarkId === null) {
       // 第一次保存 = 新建。和笔记/任务不一样：
       // 它们是「先建空壳再编辑」，但一条没有链接的收藏既存不进去、也不该存在，
       // 所以等用户填了链接、真要存了，才去建这条记录。
-      const b = await api('/api/bookmarks', { method: 'POST', body: payload });
-      currentBookmarkId = b.id;
-      autoTitle = '';
+      saved = await api('/api/bookmarks', { method: 'POST', body: payload });
+      currentBookmarkId = saved.id;
+      // 注意：这里**不要**把 autoTitle 清空。
+      // 如果标题还是「按网址自动生成的那个」（用户没动过标题框），
+      // 抓完网页之后要用网页的真标题把它换掉；
+      // 用户要是自己改过标题，标题框的 input 事件早就把 autoTitle 清空了。
     } else {
-      await api(`/api/bookmarks/${currentBookmarkId}`, { method: 'PUT', body: payload });
+      saved = await api(`/api/bookmarks/${currentBookmarkId}`, { method: 'PUT', body: payload });
     }
   } catch (e) {
     bookmarkSaveFailed = true;
@@ -1702,6 +1860,10 @@ async function saveBookmarkNow() {
   const t = new Date();
   setBookmarkSaveState('saved', `已保存 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`);
   await loadBookmarks();            // 刷新列表，标题和排序跟着更新
+  renderBookmarkContent();
+  // 链接存好了就去把网页内容抓回来。不 await —— 抓取要好几秒，
+  // 不能让你对着界面干等，期间该干什么干什么。
+  maybeAutoFetch(saved);
 }
 
 function scheduleBookmarkSave() {
@@ -1768,6 +1930,21 @@ bmDelBtn.addEventListener('click', async () => {
 });
 
 bmCancelBtn.addEventListener('click', bookmarkDisarmDelete);
+
+// 「重新抓取」：抓失败、或内容过期了想重来时点它
+bmRefetchBtn.addEventListener('click', () => {
+  if (currentBookmarkId === null) {
+    showBanner('先把链接保存下来，才能去抓网页内容。');
+    return;
+  }
+  runFetch(currentBookmarkId, true);
+});
+
+// 「查看正文 / 收起正文」
+bmToggleBtn.addEventListener('click', () => {
+  bmShowFullText = !bmShowFullText;
+  renderBookmarkContent();
+});
 
 bmStateEl.addEventListener('click', () => {
   if (bookmarkSaveFailed) { clearTimeout(bookmarkSaveTimer); saveBookmarkNow(); }
@@ -1871,6 +2048,7 @@ function renderSearchResults(keyword, data) {
           <span class="kind-tag bm">收藏</span>
         </div>
         <div class="bm-host-line">${mark(b.url, keyword)}</div>
+        ${b.summary ? `<div class="bm-host-line bm-sum-line">${mark(b.summary.slice(0, 80), keyword)}${b.summary.length > 80 ? '…' : ''}</div>` : ''}
       </div>`).join('');
   }
   searchResultsEl.innerHTML = html;
