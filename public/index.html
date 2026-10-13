@@ -419,26 +419,28 @@
   }
   .list-sec b { font-weight: 600; color: var(--text-sub); }
 
-  /* ---------- 任务编辑区 ----------
-     和笔记一样，flex 高度链一环都不能断（见坑 #9）：
+  /* ---------- 任务编辑区 / 收藏编辑区 ----------
+     同样要保证每一层都是 flex 容器（见坑 #9）：
        #task-pane(列) → #task-edit(列) → .doc.task-doc
-     少了 #task-edit 这一环，标题框就会被压扁。 */
-  #task-pane {
+       #bookmark-pane(列) → #bookmark-edit(列) → .doc.bm-doc
+     少了中间那环，标题框就会被压扁。
+     三个视图的骨架完全一样，所以选择器写在一起，别复制三遍。 */
+  #task-pane, #bookmark-pane {
     flex: 1; display: flex; flex-direction: column;
     min-width: 0; min-height: 0; background: var(--surface);
   }
-  #task-edit { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  #task-head {
+  #task-edit, #bookmark-edit { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #task-head, #bookmark-head {
     display: flex; align-items: center; gap: 8px;
     height: 56px; padding: 0 20px; flex-shrink: 0;
     border-bottom: 1px solid var(--border-soft);
   }
-  #task-empty {
+  #task-empty, #bookmark-empty {
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 12px; color: var(--text-mute);
   }
-  #task-empty svg { width: 44px; height: 44px; opacity: .4; }
-  #task-empty p { margin: 0; font-size: 13.5px; }
+  #task-empty svg, #bookmark-empty svg { width: 44px; height: 44px; opacity: .4; }
+  #task-empty p, #bookmark-empty p { margin: 0; font-size: 13.5px; }
   .doc.task-doc { max-width: 720px; padding: 40px 48px 60px; }
   #task-title {
     width: 100%; border: none; outline: none; background: transparent;
@@ -491,8 +493,43 @@
     border-radius: 4px; color: var(--accent); background: var(--accent-soft);
   }
   .kind-tag.task { color: #1a7f4f; background: #eaf7f0; }
+  .kind-tag.bm { color: #a16207; background: #fff6e6; }
   /* 搜索词在摘要里高亮出来 */
   .result-item .snippet mark { background: #fff2b8; color: inherit; border-radius: 2px; }
+
+  /* ---------- 收藏 ---------- */
+  /* 列表项第二行是站点名，代替笔记的正文摘要 */
+  .bm-host-line {
+    margin-top: 3px; font-size: 12px; color: var(--text-mute);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .doc.bm-doc { max-width: 720px; padding: 40px 48px 60px; }
+  /* 链接用等宽字体：一长串网址用比例字体看不清楚 / 也容易看错 */
+  #bookmark-url {
+    width: 100%; padding: 12px 14px; flex-shrink: 0;
+    border: 1px solid var(--border); border-radius: 10px; outline: none;
+    background: #fafbfc; color: var(--text);
+    font-size: 15px; font-family: ui-monospace, Consolas, "Courier New", monospace;
+    transition: border-color .15s, background .15s, box-shadow .15s;
+  }
+  #bookmark-url:focus {
+    border-color: var(--accent); background: var(--surface);
+    box-shadow: 0 0 0 3px rgba(79,110,247,.12);
+  }
+  /* 链接不合法时立刻标红，不用等保存失败才发现 */
+  #bookmark-url.bad { border-color: var(--danger); background: #fdeced; }
+  #bookmark-title {
+    width: 100%; padding: 0 0 14px; margin-top: 22px; flex-shrink: 0;
+    border: none; border-bottom: 1px solid var(--border-soft); outline: none;
+    background: transparent;
+    font-size: 21px; font-weight: 600; line-height: 1.4;
+    font-family: inherit; color: var(--text);
+  }
+  #bookmark-title::placeholder { color: #c4c9cf; }
+  .bm-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .bm-host { font-size: 13px; color: var(--text-mute); }
+  .bm-hint { margin-top: 18px; font-size: 12.5px; line-height: 1.7; color: var(--text-mute); }
+  .bm-hint.bad { color: var(--danger); }
 
 </style>
 </head>
@@ -505,10 +542,11 @@
       <div class="brand-mark">记</div>
       <h1>个人工作台</h1>
     </div>
-    <!-- v2：笔记 / 任务 两个视图的切换 -->
+    <!-- v2：笔记 / 任务 / 收藏 三个视图的切换 -->
     <div class="view-switch" id="view-switch">
       <button data-view="notes" class="on">笔记</button>
       <button data-view="tasks">任务</button>
+      <button data-view="bookmarks">收藏</button>
     </div>
     <div class="search-wrap">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -541,10 +579,12 @@
     <aside id="sidebar">
       <div id="note-list"></div>
       <div id="task-list" class="hidden"></div>
+      <div id="bookmark-list" class="hidden"></div>
       <div id="search-results" class="hidden"></div>
       <div class="sidebar-foot">
         <button id="new-note">＋ 新建笔记</button>
         <button id="new-task" class="hidden">＋ 新建任务</button>
+        <button id="new-bookmark" class="hidden">＋ 收藏链接</button>
         <div id="hints"></div>
       </div>
     </aside>
@@ -609,6 +649,36 @@
             <input id="task-due" type="date">
             <button class="btn-primary" id="task-toggle" style="margin-left:auto">标记完成</button>
           </div>
+        </div>
+      </div>
+    </section>
+    <!-- 右侧：收藏编辑区（收藏视图才显示） -->
+    <section id="bookmark-pane" class="hidden">
+      <div id="bookmark-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6.5 3.5h11a1 1 0 0 1 1 1v16l-6.5-4.2L5.5 20.5v-16a1 1 0 0 1 1-1z"/>
+        </svg>
+        <p>把以后还要看的链接存进来，或点「收藏链接」</p>
+      </div>
+
+      <div id="bookmark-edit" class="hidden">
+        <div id="bookmark-head">
+          <span id="bookmark-state">已保存</span>
+          <button class="btn hidden" id="bookmark-cancel">取消</button>
+          <button class="btn danger" id="bookmark-delete">删除</button>
+        </div>
+        <div class="doc bm-doc">
+          <input id="bookmark-url" placeholder="https://把链接粘到这里">
+          <input id="bookmark-title" placeholder="给它起个名字，以后好找">
+          <div class="bm-row">
+            <span class="bm-host" id="bookmark-host"></span>
+            <a id="bookmark-open" class="btn" style="margin-left:auto"
+               target="_blank" rel="noopener noreferrer">打开链接 ↗</a>
+          </div>
+          <p class="bm-hint" id="bookmark-hint">
+            标题可以留空，会用网址自动生成一个。这一版不联网抓取正文，想存摘要的话在标题里带几个关键词就行。
+          </p>
         </div>
       </div>
     </section>
@@ -1139,24 +1209,24 @@ function hideToast() {
   lastDeleted = null;
 }
 
-// 点「撤销」把刚才删掉的笔记 / 任务恢复
+// 点「撤销」把刚才删掉的笔记 / 任务 / 收藏恢复
 $('toast-undo').addEventListener('click', async () => {
   if (lastDeleted === null) return;
   const info = lastDeleted;      // hideToast() 会把 lastDeleted 清空，所以先存一份
-  const base = info.kind === 'task' ? 'tasks' : 'notes';
+  const k = KIND[info.kind];
+  if (!k) return;
   try {
-    await api(`/api/${base}/${info.id}/restore`, { method: 'POST' });
+    await api(`/api/${info.kind === 'note' ? 'notes' : info.kind === 'task' ? 'tasks' : 'bookmarks'}/${info.id}/restore`,
+              { method: 'POST' });
   } catch (e) {
     showBanner(`恢复失败：${e.message}`);
     return;
   }
   hideToast();
-  // 被删的是任务、但当前停在笔记页（或反过来）就切回去，
+  // 被删的是哪一类、但当前停在别的视图，就切回去，
   // 否则用户点了「撤销」却看不到任何变化，会以为撤销失败了。
-  const need = info.kind === 'task' ? 'tasks' : 'notes';
-  const wantView = need === 'tasks' ? 'tasks' : 'notes';
-  if (wantView !== view) await setView(wantView);
-  view === 'tasks' ? loadTasks() : loadList();
+  if (k.view !== view) await setView(k.view);
+  k.reload();
 });
 
 // ============ 事件绑定 ============
@@ -1173,8 +1243,8 @@ $('new-note').addEventListener('click', createNote);
 // 关键：导出前必须先把正在编辑的内容存下去，否则刚写的那几条会漏掉，
 // 导出会是一份「看起来完整、其实少了最新内容」的备份。
 $('export-btn').addEventListener('click', async () => {
-  await flushSaves();          // 笔记和任务的待保存内容一起补存
-  if (saveFailed || taskSaveFailed) {
+  await flushSaves();          // 笔记、任务、收藏的待保存内容一起补存
+  if (saveFailed || taskSaveFailed || bookmarkSaveFailed) {
     showBanner('有内容没能保存，导出的是较早的版本。恢复服务后再导出一次。');
   }
   // 用临时 <a download> 触发下载，而不是 location.href。
@@ -1459,6 +1529,257 @@ taskListEl.addEventListener('click', (e) => {
 
 $('new-task').addEventListener('click', createTask);
 
+// ============ v2.3：收藏 ============
+// 只存链接和标题，**不联网**。抓正文和摘要是下一步的事。
+
+let bookmarks = [];            // 当前收藏列表
+let currentBookmarkId = null;  // 正在编辑的收藏 id；null = 还没存过的新收藏
+let bookmarkSaveTimer = null;
+let bookmarkSaveFailed = false;
+let bookmarkConfirmArmed = false;
+let autoTitle = '';            // 标题是自动生成的（''）还是用户自己打的
+
+const bookmarkListEl = $('bookmark-list');
+const bmUrlEl = $('bookmark-url'), bmTitleEl = $('bookmark-title');
+const bmHostEl = $('bookmark-host'), bmOpenEl = $('bookmark-open');
+const bmHintEl = $('bookmark-hint'), bmStateEl = $('bookmark-state');
+const bmDelBtn = $('bookmark-delete'), bmCancelBtn = $('bookmark-cancel');
+
+// 只放行 http/https。后端入库前已经验过一遍，这里再验一次是「保险」：
+// 免得以后数据从别的口子进来（比如将来做导入），点一下就执行脚本。
+const SAFE_HTTP = /^https?:\/\//i;
+function safeLink(u) {
+  const s = String(u || '').trim();
+  return SAFE_HTTP.test(s) ? s : '';
+}
+
+// 从网址里推出一个能看的标题，纯字符串处理，不发任何请求：
+//   https://developer.mozilla.org/zh-CN/docs/Web/HTML
+//     -> "HTML · developer.mozilla.org"
+// 这样不联网也有个像样的默认标题，不用每次对着空白输入框发呆。
+function titleFromUrl(raw) {
+  let u;
+  try { u = new URL(String(raw).trim()); } catch { return ''; }
+  const host = u.hostname.replace(/^www\./, '');
+  const seg = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+  const tail = seg.replace(/[-_]+/g, ' ').trim();
+  if (host && tail) return `${tail} · ${host}`;
+  return host || '';
+}
+
+async function loadBookmarks(keyword = searchEl.value.trim()) {
+  const url = keyword ? `/api/bookmarks?search=${encodeURIComponent(keyword)}` : '/api/bookmarks';
+  try {
+    bookmarks = await api(url);
+  } catch (e) {
+    bookmarkListEl.innerHTML = `
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.5 9.5 12 3l7.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19z"/>
+          <path d="M12 9v4M12 16.5v.01"/>
+        </svg>
+        <p>连不上工作台服务。请确认黑色命令行窗口还开着。</p>
+      </div>`;
+    showBanner('连不上工作台服务。如果你没关掉命令行窗口，可能是它已经退出了。');
+    return;
+  }
+  hideBanner();
+  syncListVisibility();
+  renderBookmarks();
+}
+
+function renderBookmarks() {
+  if (bookmarks.length === 0) {
+    const hint = searchEl.value.trim() ? '没有找到相关收藏' : '还没有收藏，点下面存一个链接';
+    bookmarkListEl.innerHTML = `<div class="empty">${EMPTY_ICON}<p>${hint}</p></div>`;
+    return;
+  }
+  bookmarkListEl.innerHTML = bookmarks.map((b) => `
+    <div class="item bm-item ${b.id === currentBookmarkId ? 'active' : ''}" data-id="${b.id}">
+      <div class="item-head">
+        <span class="t">${esc(b.title)}</span>
+        <span class="d">${fmtTime(b.updated_at)}</span>
+      </div>
+      <div class="bm-host-line">${esc(b.url)}</div>
+    </div>`).join('');
+}
+
+function setBookmarkSaveState(state, text) {
+  bmStateEl.classList.remove('saving', 'saved');
+  if (state) bmStateEl.classList.add(state);
+  bmStateEl.textContent = text;
+}
+
+// 把链接框的状态（正常 / 标红）和「打开链接」按钮一起刷新
+function syncBookmarkFields() {
+  const raw = bmUrlEl.value.trim();
+  const ok = !!safeLink(raw);
+  bmUrlEl.classList.toggle('bad', !!raw && !ok);
+  if (!raw) {
+    bmHintEl.className = 'bm-hint';
+    bmHintEl.textContent = '标题可以留空，会用网址自动生成一个。这一版不联网抓取正文，想存摘要的话在标题里带几个关键词就行。';
+  } else if (!ok) {
+    bmHintEl.className = 'bm-hint bad';
+    bmHintEl.textContent = '这不像一个能打开的网址。必须以 http:// 或 https:// 开头。';
+  } else {
+    bmHintEl.className = 'bm-hint';
+    let host = '';
+    try { host = new URL(raw).hostname; } catch { /* 上面已经验过了，这里只是取个名字 */ }
+    bmHintEl.textContent = host ? `来自 ${host}` : '';
+  }
+  // 链接不合法时不给可点的入口
+  bmOpenEl.classList.toggle('hidden', !ok);
+  if (ok) bmOpenEl.href = raw;
+}
+
+function openBookmark(id) {
+  const b = bookmarks.find((x) => x.id === id);
+  if (!b) return;
+  bookmarkDisarmDelete();
+  currentBookmarkId = id;
+  bmUrlEl.value = b.url;
+  bmTitleEl.value = b.title;
+  autoTitle = '';                       // 打开的是已存的收藏，标题算用户自己定的
+  $('bookmark-empty').classList.add('hidden');
+  $('bookmark-edit').classList.remove('hidden');
+  setBookmarkSaveState('saved', '已保存');
+  syncBookmarkFields();
+  renderBookmarks();
+  bmTitleEl.focus();
+}
+
+// 打开一条「还没存过」的收藏（点新建按钮进来的）
+function openNewBookmark() {
+  bookmarkDisarmDelete();
+  currentBookmarkId = null;
+  bmUrlEl.value = '';
+  bmTitleEl.value = '';
+  autoTitle = '';
+  $('bookmark-empty').classList.add('hidden');
+  $('bookmark-edit').classList.remove('hidden');
+  setBookmarkSaveState('', '还没存');
+  syncBookmarkFields();
+  bmUrlEl.focus();
+}
+
+function closeBookmarkEditor() {
+  currentBookmarkId = null;
+  $('bookmark-edit').classList.add('hidden');
+  $('bookmark-empty').classList.remove('hidden');
+  renderBookmarks();
+}
+
+async function saveBookmarkNow() {
+  const u = bmUrlEl.value.trim();
+  if (!u) { showBanner('先填一个链接再保存。'); return; }
+  if (!safeLink(u)) {
+    syncBookmarkFields();
+    showBanner('链接必须以 http:// 或 https:// 开头，这条收藏没有保存。');
+    return;
+  }
+  setBookmarkSaveState('saving', '保存中…');
+  const payload = JSON.stringify({ url: u, title: bmTitleEl.value });
+  try {
+    if (currentBookmarkId === null) {
+      // 第一次保存 = 新建。和笔记/任务不一样：
+      // 它们是「先建空壳再编辑」，但一条没有链接的收藏既存不进去、也不该存在，
+      // 所以等用户填了链接、真要存了，才去建这条记录。
+      const b = await api('/api/bookmarks', { method: 'POST', body: payload });
+      currentBookmarkId = b.id;
+      autoTitle = '';
+    } else {
+      await api(`/api/bookmarks/${currentBookmarkId}`, { method: 'PUT', body: payload });
+    }
+  } catch (e) {
+    bookmarkSaveFailed = true;
+    setBookmarkSaveState('error', '保存失败，点此重试');
+    showBanner(`没能保存收藏：${e.message}。你填的内容还在输入框里，恢复服务后再点重试。`);
+    return;
+  }
+  bookmarkSaveFailed = false;
+  hideBanner();
+  const t = new Date();
+  setBookmarkSaveState('saved', `已保存 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`);
+  await loadBookmarks();            // 刷新列表，标题和排序跟着更新
+}
+
+function scheduleBookmarkSave() {
+  setBookmarkSaveState('', '编辑中…');
+  clearTimeout(bookmarkSaveTimer);
+  bookmarkSaveTimer = setTimeout(saveBookmarkNow, 800);
+}
+
+// 链接一改就同步校验 + 顺手生成标题
+bmUrlEl.addEventListener('input', () => {
+  syncBookmarkFields();
+  // 只有在「标题还是空的」或「标题就是上次自动生成的那个」时才代填，
+  // 绝不能覆盖用户自己打的字。
+  if (bmTitleEl.value === '' || bmTitleEl.value === autoTitle) {
+    const guess = titleFromUrl(bmUrlEl.value);
+    if (guess) { bmTitleEl.value = guess; autoTitle = guess; }
+  }
+  scheduleBookmarkSave();
+});
+
+// 标题被手动改过之后，就不再自动覆盖
+bmTitleEl.addEventListener('input', () => { autoTitle = ''; scheduleBookmarkSave(); });
+
+// 点「打开链接」前先把 href 确认一遍
+bmOpenEl.addEventListener('click', (e) => {
+  if (!safeLink(bmUrlEl.value)) e.preventDefault();
+});
+
+// 删除：和笔记、任务一样是行内二次确认
+function bookmarkArmDelete() {
+  bookmarkConfirmArmed = true;
+  bmDelBtn.textContent = '确认删除？';
+  bmDelBtn.classList.add('armed');
+  bmCancelBtn.classList.remove('hidden');
+}
+
+function bookmarkDisarmDelete() {
+  bookmarkConfirmArmed = false;
+  bmDelBtn.textContent = '删除';
+  bmDelBtn.classList.remove('armed');
+  bmCancelBtn.classList.add('hidden');
+}
+
+bmDelBtn.addEventListener('click', async () => {
+  if (currentBookmarkId === null) {      // 还没存过的新收藏，直接关掉就行
+    if (!bookmarkConfirmArmed) { bookmarkArmDelete(); return; }
+    closeBookmarkEditor();
+    return;
+  }
+  if (!bookmarkConfirmArmed) { bookmarkArmDelete(); return; }
+
+  const id = currentBookmarkId;
+  const b = bookmarks.find((x) => x.id === id);
+  bookmarkDisarmDelete();
+  try {
+    await api(`/api/bookmarks/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    showBanner(`删除失败：${e.message}`);
+    return;
+  }
+  closeBookmarkEditor();
+  await loadBookmarks();
+  showUndo({ id, kind: 'bookmark', title: b ? b.title : '这条收藏' });
+});
+
+bmCancelBtn.addEventListener('click', bookmarkDisarmDelete);
+
+bmStateEl.addEventListener('click', () => {
+  if (bookmarkSaveFailed) { clearTimeout(bookmarkSaveTimer); saveBookmarkNow(); }
+});
+
+bookmarkListEl.addEventListener('click', (e) => {
+  const item = e.target.closest('.item');
+  if (item) openBookmark(Number(item.dataset.id));
+});
+
+$('new-bookmark').addEventListener('click', openNewBookmark);
+
 // ============ v2.2：统一搜索（笔记 + 任务一起搜） ============
 // 以前搜索框只过滤当前视图的列表，想找的东西在另一个视图里就得先切过去再搜。
 // 现在搜索框是全局的：框里有字，左侧就变成「笔记和任务的混合结果」。
@@ -1477,8 +1798,10 @@ function syncListVisibility() {
   searchResultsEl.classList.toggle('hidden', !searching);
   $('note-list').classList.toggle('hidden', searching || view !== 'notes');
   $('task-list').classList.toggle('hidden', searching || view !== 'tasks');
+  $('bookmark-list').classList.toggle('hidden', searching || view !== 'bookmarks');
   $('new-note').classList.toggle('hidden', searching || view !== 'notes');
   $('new-task').classList.toggle('hidden', searching || view !== 'tasks');
+  $('new-bookmark').classList.toggle('hidden', searching || view !== 'bookmarks');
 }
 
 // 把命中的搜索词标黄。
@@ -1496,14 +1819,16 @@ function mark(text, keyword) {
 function renderSearchResults(keyword, data) {
   const rNotes = data.notes || [];
   const rTasks = data.tasks || [];
-  const total = rNotes.length + rTasks.length;
+  const rMarks = data.bookmarks || [];
+  const total = rNotes.length + rTasks.length + rMarks.length;
 
+  const count = (n, name) => (n ? `　${name} ${n}` : '');
   let html = `<div id="search-summary">搜索「<b>${esc(keyword)}</b>」　共 ${total} 条` +
-             `${rNotes.length ? `　笔记 ${rNotes.length}` : ''}` +
-             `${rTasks.length ? `　任务 ${rTasks.length}` : ''}</div>`;
+             `${count(rNotes.length, '笔记')}${count(rTasks.length, '任务')}` +
+             `${count(rMarks.length, '收藏')}</div>`;
 
   if (total === 0) {
-    html += `<div class="empty">${EMPTY_ICON}<p>笔记和任务里都没有「${esc(keyword)}」</p></div>`;
+    html += `<div class="empty">${EMPTY_ICON}<p>笔记、任务和收藏里都没有「${esc(keyword)}」</p></div>`;
     searchResultsEl.innerHTML = html;
     return;
   }
@@ -1536,6 +1861,18 @@ function renderSearchResults(keyword, data) {
       </div>`;
     }).join('');
   }
+
+  if (rMarks.length) {
+    html += `<div class="result-head"><b>收藏</b></div>`;
+    html += rMarks.map((b) => `
+      <div class="item result-item bm-item" data-kind="bookmark" data-id="${b.id}">
+        <div class="item-head">
+          <span class="t">${mark(b.title, keyword)}</span>
+          <span class="kind-tag bm">收藏</span>
+        </div>
+        <div class="bm-host-line">${mark(b.url, keyword)}</div>
+      </div>`).join('');
+  }
   searchResultsEl.innerHTML = html;
 }
 
@@ -1547,7 +1884,7 @@ async function runSearch(keyword) {
   if (keyword !== searchEl.value) searchEl.value = keyword;
   if (!s) {
     syncListVisibility();          // 退出搜索模式，隐藏搜索结果面板
-    view === 'tasks' ? await loadTasks() : await loadList();
+    await reloadCurrentView();
     return;
   }
   syncListVisibility();
@@ -1578,14 +1915,25 @@ async function runSearch(keyword) {
 }
 
 // 点搜索结果 → 切到它所属的视图并打开
+// 三种类型各写一个 if 也不长，但下面这张表更省事：
+// 加第四种东西时，这里加一行就够了，撤销和搜索跳转都自动能用。
+const KIND = {
+  note:     { view: 'notes',     reload: () => loadList() },
+  task:     { view: 'tasks',     reload: () => loadTasks() },
+  bookmark: { view: 'bookmarks', reload: () => loadBookmarks() },
+};
+
 searchResultsEl.addEventListener('click', async (e) => {
   const item = e.target.closest('.item');
   if (!item) return;
-  const kind = item.dataset.kind;
+  const k = KIND[item.dataset.kind];
+  if (!k) return;
   const id = Number(item.dataset.id);
   // setView 会清空搜索框（也就是退出搜索模式），所以要等它把列表加载完再打开
-  await setView(kind === 'task' ? 'tasks' : 'notes');
-  if (kind === 'task') openTask(id); else openNote(id);
+  await setView(k.view);
+  if (item.dataset.kind === 'bookmark') openBookmark(id);
+  else if (item.dataset.kind === 'task') openTask(id);
+  else openNote(id);
 });
 
 // ============ 视图切换（笔记 / 任务） ============
@@ -1597,6 +1945,7 @@ async function flushSaves() {
   const jobs = [];
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; jobs.push(saveNow()); }
   if (taskSaveTimer) { clearTimeout(taskSaveTimer); taskSaveTimer = null; jobs.push(saveTaskNow()); }
+  if (bookmarkSaveTimer) { clearTimeout(bookmarkSaveTimer); bookmarkSaveTimer = null; jobs.push(saveBookmarkNow()); }
   await Promise.all(jobs);
 }
 
@@ -1614,7 +1963,10 @@ async function setView(v) {
       b.classList.toggle('on', b.dataset.view === v));
     $('editor').classList.toggle('hidden', v !== 'notes');
     $('task-pane').classList.toggle('hidden', v !== 'tasks');
-    searchEl.placeholder = v === 'notes' ? '搜索标题和正文…' : '搜索任务标题…';
+    $('bookmark-pane').classList.toggle('hidden', v !== 'bookmarks');
+    searchEl.placeholder =
+      v === 'notes' ? '搜索标题和正文…' :
+      v === 'tasks' ? '搜索任务标题…' : '搜索收藏标题和链接…';
     renderHints();
     hideToast();
   }
@@ -1626,7 +1978,14 @@ async function setView(v) {
   syncListVisibility();
   // 这里要 await：搜索结果点进来时，拿到 id 之后马上要 openNote/openTask，
   // 列表必须已经加载好了，否则 find 不到这条、编辑器不会打开。
-  if (v === 'notes') await loadList(); else await loadTasks();
+  await reloadCurrentView();
+}
+
+// 按当前视图刷新该列表。以后再加视图，只改这一处就够了。
+function reloadCurrentView() {
+  return view === 'bookmarks' ? loadBookmarks()
+       : view === 'tasks' ? loadTasks()
+       : loadList();
 }
 
 document.querySelectorAll('#view-switch button').forEach((b) => {
@@ -1638,6 +1997,8 @@ const HINTS = {
   notes: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>' +
          '<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭',
   tasks: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>' +
+         '<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭',
+  bookmarks: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>' +
          '<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭',
 };
 function renderHints() { $('hints').innerHTML = HINTS[view]; }
@@ -1652,10 +2013,12 @@ function renderHints() { $('hints').innerHTML = HINTS[view]; }
 document.addEventListener('keydown', (e) => {
   // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
   if (e.key === 'Escape') {
+    if (bookmarkConfirmArmed) { bookmarkDisarmDelete(); return; }
     if (taskConfirmArmed) { taskDisarmDelete(); return; }
     if (confirmArmed) { disarmDelete(); return; }
     if (!$('toast').classList.contains('hidden')) { hideToast(); return; }
     if (searchEl.value) { searchEl.value = ''; runSearch(''); searchEl.blur(); return; }
+    if (view === 'bookmarks') { if (currentBookmarkId !== null) closeBookmarkEditor(); return; }
     if (view === 'tasks') { if (currentTaskId !== null) closeTaskEditor(); return; }
     if (currentId !== null) { closeEditor(); }
     return;
@@ -1665,7 +2028,9 @@ document.addEventListener('keydown', (e) => {
 
   if (e.key === 'Enter') {                // 新建：跟着当前视图走
     e.preventDefault();
-    view === 'tasks' ? createTask() : createNote();
+    if (view === 'bookmarks') openNewBookmark();
+    else if (view === 'tasks') createTask();
+    else createNote();
   } else if (e.key === 'k' || e.key === 'K') {   // 搜索
     e.preventDefault();
     searchEl.focus();
@@ -1680,9 +2045,15 @@ document.addEventListener('keydown', (e) => {
     wrap('*', '*', '斜体');
   } else if (e.key === 's' || e.key === 'S') {   // 保存
     e.preventDefault();
-    if (view === 'tasks') {
+    if (view === 'bookmarks') {
+      if (bookmarkSaveTimer || currentBookmarkId !== null) {
+        clearTimeout(bookmarkSaveTimer);   // 取消待执行的自动保存，现在就存
+        bookmarkSaveTimer = null;
+        saveBookmarkNow();
+      }
+    } else if (view === 'tasks') {
       if (currentTaskId !== null) {
-        clearTimeout(taskSaveTimer);      // 取消待执行的自动保存，现在就存
+        clearTimeout(taskSaveTimer);
         taskSaveTimer = null;
         saveTaskNow();
       }
@@ -1698,7 +2069,7 @@ document.addEventListener('keydown', (e) => {
 // 如果上次保存失败过，就拦一下，别让用户稀里糊涂丢掉内容。
 window.addEventListener('beforeunload', (e) => {
   flushSaves();
-  if (saveFailed || taskSaveFailed) {
+  if (saveFailed || taskSaveFailed || bookmarkSaveFailed) {
     e.preventDefault();
     e.returnValue = '';        // 浏览器会弹出「确认离开」提示
   }
@@ -1707,7 +2078,7 @@ window.addEventListener('beforeunload', (e) => {
 // ============ 启动 ============
 setMode(mode);
 renderHints();
-view === 'tasks' ? loadTasks() : loadList();
+reloadCurrentView();
 </script>
 </body>
 </html>

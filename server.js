@@ -74,6 +74,36 @@ const tq = {
   allForExport: db.prepare("SELECT title,status,due_date,completed_at,created_at FROM tasks WHERE deleted_at IS NULL ORDER BY (status='done') ASC, (due_date IS NULL) ASC, due_date ASC"),
 };
 
+// ============ v2.3 新增：收藏（还是独立的表） ============
+// 继续守「一张表一个概念」。收藏存的是「一个链接 + 我对它的称呼」，
+// 不是笔记也不是任务，不和它们混在一起。
+//
+// 这一版刻意**不联网**：只存链接和标题。
+// 「自动抓正文和摘要」是下一步的事，它牵扯超时、重试、反爬，
+// 和「存两条数据」完全不是一回事，分开做才稳。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS bookmarks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    url        TEXT NOT NULL DEFAULT '',
+    title      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    deleted_at TEXT
+  );
+`);
+
+const bmq = {
+  list:   db.prepare('SELECT id,url,title,created_at,updated_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY updated_at DESC'),
+  // 标题和链接都能搜到：有时你记得住的是「哪个网站」，想不起标题
+  search: db.prepare('SELECT id,url,title,created_at,updated_at FROM bookmarks WHERE deleted_at IS NULL AND (title LIKE ? OR url LIKE ?) ORDER BY updated_at DESC'),
+  get:     db.prepare('SELECT * FROM bookmarks WHERE id = ?'),
+  create:  db.prepare('INSERT INTO bookmarks (url,title) VALUES (?,?)'),
+  update:  db.prepare("UPDATE bookmarks SET url=?, title=?, updated_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  softDel: db.prepare("UPDATE bookmarks SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  restore: db.prepare('UPDATE bookmarks SET deleted_at=NULL WHERE id=?'),
+  allForExport: db.prepare('SELECT url,title,created_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY created_at ASC'),
+};
+
 // 软删除：不真删，只打一个删除时间戳，撤销就是把时间戳清空。
 // 这样误删之后还能捞回来 —— 这是个人笔记库最需要的一个保险。
 const q = {
@@ -93,6 +123,17 @@ const q = {
 function normDue(v) {
   const s = String(v ?? '').trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+// 链接归一化：**只放行 http / https**，其它一律拒绝（返回 null）。
+// 这不是洁癖：前端会把收藏的链接渲染成可点的 <a>。
+// 如果放行 javascript:alert(1)，用户在列表里点一下，
+// 脚本就在他自己工作台的页面上下文里执行了 —— 存进来的是个数据，读出来却成了代码执行。
+function normUrl(v) {
+  const s = String(v ?? '').trim();
+  if (!/^https?:\/\//i.test(s)) return null;
+  try { new URL(s); } catch { return null; }   // 再让内置解析器验一次格式
+  return s;
 }
 
 const send = (res, code, data) => {
@@ -120,6 +161,7 @@ const readBody = (req) => new Promise((resolve, reject) => {
 function buildMarkdown() {
   const notes = q.allForExport.all();
   const tasks = tq.allForExport.all();
+  const marks = bmq.allForExport.all();
   const today = new Date();
   const stamp = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
@@ -127,7 +169,9 @@ function buildMarkdown() {
     `# 个人工作台 · 导出备份`,
     ``,
     `> 导出时间：${today.toLocaleString('zh-CN')}`,
-    `> 共 ${notes.length} 条笔记${tasks.length ? `，${tasks.length} 条任务（已完成 ${doneCount}）` : ''}`,
+    `> 共 ${notes.length} 条笔记` +
+       `${tasks.length ? `，${tasks.length} 条任务（已完成 ${doneCount}）` : ''}` +
+       `${marks.length ? `，${marks.length} 条收藏` : ''}`,
     ``,
     `---`,
     ``,
@@ -152,6 +196,16 @@ function buildMarkdown() {
     }
     lines.push(``, `---`, ``);
   }
+
+  // 收藏用最朴素的「- [标题](链接)」，任何编辑器点得开。
+  // URL 存进来之前已经被 normUrl 验过是 http/https 了，这里不用再担心协议。
+  if (marks.length) {
+    lines.push(`# 收藏`, ``);
+    for (const b of marks) {
+      lines.push(`- [${b.title}](${b.url})`);
+    }
+    lines.push(``, `---`, ``);
+  }
   return { text: lines.join('\n'), stamp };
 }
 
@@ -173,13 +227,14 @@ function handleExport(req, res) {
 // 以后加了收藏表，这里加一段查询、返回里加一个 key，前端只管渲染。
 function handleSearch(res, keyword) {
   const s = keyword.trim();
-  if (!s) return send(res, 200, { keyword: '', notes: [], tasks: [] });
+  if (!s) return send(res, 200, { keyword: '', notes: [], tasks: [], bookmarks: [] });
   const kw = `%${s}%`;
   return send(res, 200, {
     keyword: s,
-    // 复用已经测过的两条查询：笔记搜标题和正文，任务搜标题
+    // 复用已经测过的查询：笔记搜标题和正文，任务搜标题，收藏搜标题和链接
     notes: q.search.all(kw, kw),
     tasks: tq.search.all(kw),
+    bookmarks: bmq.search.all(kw, kw),
   });
 }
 
@@ -288,6 +343,55 @@ async function api(req, res, url) {
     // 软删除
     if (req.method === 'DELETE') {
       tq.softDel.run(id);
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  // ============ 收藏接口 ============
+  // 同样照抄任务的结构。这里多一条规矩：链接必须是合法的 http/https 才收。
+
+  // 收藏列表 / 搜索
+  if (req.method === 'GET' && url.pathname === '/api/bookmarks') {
+    const s = url.searchParams.get('search')?.trim();
+    if (s) return send(res, 200, bmq.search.all(`%${s}%`, `%${s}%`));
+    return send(res, 200, bmq.list.all());
+  }
+
+  // 新建收藏
+  if (req.method === 'POST' && url.pathname === '/api/bookmarks') {
+    const { url = '', title = '' } = await readBody(req);
+    const u = normUrl(url);
+    // 链接不合法就别入库。这条收藏本身也没意义，留个空壳更难删。
+    if (!u) return send(res, 400, { error: '需要一个 http:// 或 https:// 开头的链接' });
+    const info = bmq.create.run(u, title.trim() || u);
+    return send(res, 200, bmq.get.get(info.lastInsertRowid));
+  }
+
+  // 读取 / 更新 / 删除单条收藏
+  if (seg[0] === 'api' && seg[1] === 'bookmarks' && seg[2]) {
+    const id = Number(seg[2]);
+    if (!Number.isInteger(id)) return send(res, 400, { error: 'bad id' });
+
+    if (req.method === 'GET') {
+      const b = bmq.get.get(id);
+      return b ? send(res, 200, b) : send(res, 404, { error: 'not found' });
+    }
+    if (req.method === 'PUT') {
+      const cur = bmq.get.get(id);
+      if (!cur || cur.deleted_at) return send(res, 404, { error: 'not found' });
+      const { url = cur.url, title = '' } = await readBody(req);
+      const u = normUrl(url) || cur.url;      // 链接改坏了就保留原来的，别把收藏弄废
+      bmq.update.run(u, title.trim() || u, id);
+      return send(res, 200, bmq.get.get(id));
+    }
+    if (req.method === 'POST' && seg[3] === 'restore') {
+      bmq.restore.run(id);
+      const b = bmq.get.get(id);
+      if (!b) return send(res, 404, { error: 'not found' });
+      return send(res, 200, b);
+    }
+    if (req.method === 'DELETE') {
+      bmq.softDel.run(id);
       return send(res, 200, { ok: true });
     }
   }
