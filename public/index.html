@@ -365,6 +365,109 @@
   .markdown img { max-width: 100%; border-radius: 6px; }
   .markdown del { color: var(--text-mute); }
   .markdown .ph { color: var(--text-mute); font-size: 13.5px; }
+
+  /* ==========================================================
+     v2 · 任务
+     ========================================================== */
+
+  /* 顶部的「笔记 / 任务」切换 */
+  .view-switch {
+    display: inline-flex; padding: 2px;
+    background: #f1f2f4; border-radius: 8px; flex-shrink: 0;
+  }
+  .view-switch button {
+    padding: 5px 14px; font-size: 13px; font-family: inherit; cursor: pointer;
+    color: var(--text-sub); background: transparent; border: 0; border-radius: 6px;
+    transition: all .15s;
+  }
+  .view-switch button:hover { color: var(--text); }
+  .view-switch button.on {
+    background: var(--surface); color: var(--accent);
+    font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+
+  /* ---------- 任务列表项 ---------- */
+  .task-item { display: flex; align-items: flex-start; gap: 10px; }
+  /* 圆圈勾选框：没完成是空心圆，完成了是绿底打勾 */
+  .check {
+    flex-shrink: 0; width: 17px; height: 17px; margin-top: 3px; padding: 0;
+    border: 1.5px solid #c4c9cf; border-radius: 50%;
+    background: transparent; cursor: pointer; transition: all .15s;
+  }
+  .check:hover { border-color: var(--accent); }
+  .check.on { background: var(--ok); border-color: var(--ok); }
+  .check.on::after {
+    content: ''; display: block; width: 4px; height: 8px; margin: 1px 0 0 5px;
+    border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  .task-main { flex: 1; min-width: 0; }
+  /* 已完成：整行变淡 + 标题划掉 */
+  .task-item.done .t { color: var(--text-mute); text-decoration: line-through; }
+  .task-item.done { opacity: .75; }
+  /* 截止日期标签。三档：普通 / 快到了（黄）/ 已逾期（红） */
+  .due {
+    display: inline-block; margin-top: 4px; padding: 1px 7px;
+    font-size: 11.5px; line-height: 1.6; border-radius: 5px;
+    color: var(--text-sub); background: #f1f2f4;
+  }
+  .due.soon { color: #a16207; background: #fff6e6; }
+  .due.over { color: #b4232a; background: #fdeced; font-weight: 500; }
+  /* 列表里的小节标题：待办 / 已完成 */
+  .list-sec {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 12px 4px; font-size: 11.5px; color: var(--text-mute);
+  }
+  .list-sec b { font-weight: 600; color: var(--text-sub); }
+
+  /* ---------- 任务编辑区 ----------
+     和笔记一样，flex 高度链一环都不能断（见坑 #9）：
+       #task-pane(列) → #task-edit(列) → .doc.task-doc
+     少了 #task-edit 这一环，标题框就会被压扁。 */
+  #task-pane {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; background: var(--surface);
+  }
+  #task-edit { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #task-head {
+    display: flex; align-items: center; gap: 8px;
+    height: 56px; padding: 0 20px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  #task-empty {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; color: var(--text-mute);
+  }
+  #task-empty svg { width: 44px; height: 44px; opacity: .4; }
+  #task-empty p { margin: 0; font-size: 13.5px; }
+  .doc.task-doc { max-width: 720px; padding: 40px 48px 60px; }
+  #task-title {
+    width: 100%; border: none; outline: none; background: transparent;
+    padding: 0 0 14px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 24px; font-weight: 700; line-height: 1.4;
+    font-family: inherit; color: var(--text);
+  }
+  #task-title::placeholder { color: #c4c9cf; }
+  .task-fields { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+  .task-fields label { font-size: 13px; color: var(--text-sub); }
+  #task-due {
+    padding: 6px 10px; font-size: 13.5px; font-family: inherit; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; background: #fafbfc;
+  }
+  #task-due:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+  /* 「标记完成」是任务页最高频的操作，给它做主色大按钮 */
+  .btn-primary {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 7px 15px; font-size: 13.5px; font-family: inherit; cursor: pointer;
+    color: #fff; background: var(--accent); border: 1px solid var(--accent);
+    border-radius: 8px; font-weight: 500; transition: all .15s;
+  }
+  .btn-primary:hover { background: #3f5ae0; border-color: #3f5ae0; }
+  .btn-primary.unmark { color: var(--text-sub); background: var(--surface); border-color: var(--border); }
+  .btn-primary.unmark:hover { background: #f4f5f7; color: var(--text); }
+  /* 刚勾完的任务闪一下绿，给个「生效了」的反馈 */
+  .task-item.flash { animation: flashbg .9s ease-out; }
+  @keyframes flashbg { from { background: #eaf7f0; } to { background: transparent; } }
 </style>
 </head>
 <body>
@@ -375,6 +478,11 @@
     <div class="brand">
       <div class="brand-mark">记</div>
       <h1>个人工作台</h1>
+    </div>
+    <!-- v2：笔记 / 任务 两个视图的切换 -->
+    <div class="view-switch" id="view-switch">
+      <button data-view="notes" class="on">笔记</button>
+      <button data-view="tasks">任务</button>
     </div>
     <div class="search-wrap">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -403,15 +511,14 @@
   </div>
 
   <main>
-    <!-- 左侧：笔记列表 -->
+    <!-- 左侧：笔记列表（笔记视图用） -->
     <aside id="sidebar">
       <div id="note-list"></div>
+      <div id="task-list" class="hidden"></div>
       <div class="sidebar-foot">
         <button id="new-note">＋ 新建笔记</button>
-        <div id="hints">
-          <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>
-          <kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭
-        </div>
+        <button id="new-task" class="hidden">＋ 新建任务</button>
+        <div id="hints"></div>
       </div>
     </aside>
 
@@ -447,6 +554,33 @@
             <div class="pane pane-view">
               <div id="preview" class="markdown"></div>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右侧：任务编辑区（任务视图才显示，和笔记编辑器互斥） -->
+    <section id="task-pane" class="hidden">
+      <div id="task-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.5 12.5 9 17l10.5-10.5"/>
+        </svg>
+        <p>从左边选一条任务，或点「新建任务」记一件事</p>
+      </div>
+
+      <div id="task-edit" class="hidden">
+        <div id="task-head">
+          <span id="task-state">已保存</span>
+          <button class="btn hidden" id="task-cancel">取消</button>
+          <button class="btn danger" id="task-delete">删除</button>
+        </div>
+        <div class="doc task-doc">
+          <input id="task-title" placeholder="要做什么？">
+          <div class="task-fields">
+            <label for="task-due">截止日期</label>
+            <input id="task-due" type="date">
+            <button class="btn-primary" id="task-toggle" style="margin-left:auto">标记完成</button>
           </div>
         </div>
       </div>
@@ -519,7 +653,7 @@ function showBanner(msg) {
 function hideBanner() {
   $('banner').classList.add('hidden');
 }
-$('banner-retry').addEventListener('click', () => loadList());
+$('banner-retry').addEventListener('click', () => view === 'tasks' ? loadTasks() : loadList());
 
 // 列表加载失败时的专用空状态：说清楚是「连不上」而不是「没内容」
 function renderListError(msg) {
@@ -951,21 +1085,22 @@ delBtn.addEventListener('click', async () => {
   }
   closeEditor();
   await loadList();
-  showUndo(id, note ? note.title : '这条笔记');
+  showUndo({ id, kind: 'note', title: note ? note.title : '这条笔记' });
 });
 
 cancelBtn.addEventListener('click', disarmDelete);
 
 // ============ 撤销删除 ============
 // 后端只是给笔记打了个删除时间戳，没有真删，所以这里能原样捞回来。
-let lastDeletedId = null;
+// 笔记和任务共用这一条撤销条，所以记下删的是哪一种。
+let lastDeleted = null;      // { id, kind: 'note'|'task', title }
 let toastTimer = null;
 
 // 显示撤销条。8 秒后自动消失，但笔记在数据库里仍然是「已删除」状态，
 // 随时可以用 POST /api/notes/:id/restore 捞回来。
-function showUndo(id, title) {
-  lastDeletedId = id;
-  $('toast-msg').textContent = `已删除「${title}」`;
+function showUndo(info) {
+  lastDeleted = info;
+  $('toast-msg').textContent = `已删除「${info.title}」`;
   $('toast').classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, 8000);
@@ -973,20 +1108,27 @@ function showUndo(id, title) {
 
 function hideToast() {
   $('toast').classList.add('hidden');
-  lastDeletedId = null;
+  lastDeleted = null;
 }
 
-// 点「撤销」把刚才删掉的笔记恢复
+// 点「撤销」把刚才删掉的笔记 / 任务恢复
 $('toast-undo').addEventListener('click', async () => {
-  if (lastDeletedId === null) return;
+  if (lastDeleted === null) return;
+  const info = lastDeleted;      // hideToast() 会把 lastDeleted 清空，所以先存一份
+  const base = info.kind === 'task' ? 'tasks' : 'notes';
   try {
-    await api(`/api/notes/${lastDeletedId}/restore`, { method: 'POST' });
+    await api(`/api/${base}/${info.id}/restore`, { method: 'POST' });
   } catch (e) {
     showBanner(`恢复失败：${e.message}`);
     return;
   }
   hideToast();
-  await loadList();
+  // 被删的是任务、但当前停在笔记页（或反过来）就切回去，
+  // 否则用户点了「撤销」却看不到任何变化，会以为撤销失败了。
+  const need = info.kind === 'task' ? 'tasks' : 'notes';
+  const wantView = need === 'tasks' ? 'tasks' : 'notes';
+  if (wantView !== view) await setView(wantView);
+  view === 'tasks' ? loadTasks() : loadList();
 });
 
 // ============ 事件绑定 ============
@@ -1003,8 +1145,8 @@ $('new-note').addEventListener('click', createNote);
 // 关键：导出前必须先把正在编辑的内容存下去，否则刚写的那几条会漏掉，
 // 导出会是一份「看起来完整、其实少了最新内容」的备份。
 $('export-btn').addEventListener('click', async () => {
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await saveNow(); }
-  if (saveFailed) {
+  await flushSaves();          // 笔记和任务的待保存内容一起补存
+  if (saveFailed || taskSaveFailed) {
     showBanner('有内容没能保存，导出的是较早的版本。恢复服务后再导出一次。');
   }
   // 用临时 <a download> 触发下载，而不是 location.href。
@@ -1022,11 +1164,316 @@ titleEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
 bodyEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });
 
 // 搜索框输入 → 实时过滤（防抖 300ms）
+// 同一个搜索框在两个视图里都能用，这里按当前视图决定搜什么
 let searchTimer = null;
 searchEl.addEventListener('input', () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => loadList(), 300);
+  searchTimer = setTimeout(() => view === 'tasks' ? loadTasks() : loadList(), 300);
 });
+
+// ============ v2：任务 ============
+// 和笔记几乎一样的流程（列表 / 载入 / 自动保存 / 二次确认删除 / 撤销），
+// 差别在于：任务多一个「完成状态」和一个「截止日期」。
+// 刻意写成同一套结构，以后再加东西照着抄就行。
+
+let tasks = [];            // 当前任务列表
+let currentTaskId = null;  // 正在查看的任务 id
+let taskSaveTimer = null;  // 任务自动保存的防抖计时器
+
+const taskListEl = $('task-list');
+const taskTitleEl = $('task-title'), taskDueEl = $('task-due'), taskStateEl = $('task-state');
+const taskDelBtn = $('task-delete'), taskCancelBtn = $('task-cancel'), taskToggleBtn = $('task-toggle');
+
+// 把 'YYYY-MM-DD' 说成人话：已逾期 2 天 / 今天截止 / 3 天后截止 / 10月20日截止
+// 返回 null 表示没设截止日期。
+function dueLabel(due) {
+  if (!due) return null;
+  const d = new Date(due + 'T00:00:00');      // 补 T00:00:00 才能按本地时间解析
+  if (isNaN(d)) return null;
+  // 用「零点」比较，否则今天早上 8 点和今天下午 3 点会被算成差 1 天
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 86400000);
+  if (days < 0)   return { text: `已逾期 ${-days} 天`, cls: 'over' };
+  if (days === 0) return { text: '今天截止', cls: 'soon' };
+  if (days === 1) return { text: '明天截止', cls: 'soon' };
+  if (days <= 7)  return { text: `${days} 天后截止`, cls: '' };
+  return { text: `${Number(due.slice(5, 7))}月${Number(due.slice(8, 10))}日截止`, cls: '' };
+}
+
+async function loadTasks(keyword = searchEl.value.trim()) {
+  const url = keyword ? `/api/tasks?search=${encodeURIComponent(keyword)}` : '/api/tasks';
+  try {
+    tasks = await api(url);
+  } catch (e) {
+    taskListEl.innerHTML = `
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.5 9.5 12 3l7.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19z"/>
+          <path d="M12 9v4M12 16.5v.01"/>
+        </svg>
+        <p>连不上工作台服务。请确认黑色命令行窗口还开着。</p>
+      </div>`;
+    showBanner('连不上工作台服务。如果你没关掉命令行窗口，可能是它已经退出了。');
+    return;
+  }
+  hideBanner();
+  renderTasks();
+}
+
+function taskItemHtml(t) {
+  const isDone = t.status === 'done';
+  const due = dueLabel(t.due_date);
+  // 已完成的任务不再显示截止标签：已经做完的事，逾期红字没有意义
+  const dueHtml = (isDone || !due) ? '' : `<span class="due ${due.cls}">${esc(due.text)}</span>`;
+  return `
+    <div class="item task-item ${isDone ? 'done' : ''} ${t.id === currentTaskId ? 'active' : ''}" data-id="${t.id}">
+      <button class="check ${isDone ? 'on' : ''}" data-toggle="${t.id}"
+              title="${isDone ? '恢复为待办' : '标记完成'}"></button>
+      <div class="task-main">
+        <div class="item-head">
+          <span class="t">${esc(t.title)}</span>
+          <span class="d">${fmtTime(t.updated_at)}</span>
+        </div>
+        ${dueHtml}
+      </div>
+    </div>`;
+}
+
+function renderTasks() {
+  if (tasks.length === 0) {
+    const hint = searchEl.value.trim() ? '没有找到相关任务' : '还没有任务，点下面新建一条';
+    taskListEl.innerHTML = `<div class="empty">${EMPTY_ICON}<p>${hint}</p></div>`;
+    return;
+  }
+  // 分成「待办 / 已完成」两小节。后端已经排好序：未完成在前、逾期的排最上面
+  const todo = tasks.filter((t) => t.status !== 'done');
+  const done = tasks.filter((t) => t.status === 'done');
+  let html = '';
+  if (todo.length) html += `<div class="list-sec"><b>待办</b>${todo.length}</div>` + todo.map(taskItemHtml).join('');
+  if (done.length) html += `<div class="list-sec"><b>已完成</b>${done.length}</div>` + done.map(taskItemHtml).join('');
+  taskListEl.innerHTML = html;
+}
+
+function setTaskSaveState(state, text) {
+  taskStateEl.classList.remove('saving', 'saved');
+  if (state) taskStateEl.classList.add(state);
+  taskStateEl.textContent = text;
+}
+
+function openTask(id) {
+  const t = tasks.find((x) => x.id === id);
+  if (!t) return;
+  taskDisarmDelete();
+  currentTaskId = id;
+  taskTitleEl.value = t.title;
+  taskDueEl.value = t.due_date || '';
+  taskToggleBtn.textContent = t.status === 'done' ? '恢复为待办' : '标记完成';
+  taskToggleBtn.classList.toggle('unmark', t.status === 'done');
+  $('task-empty').classList.add('hidden');
+  $('task-edit').classList.remove('hidden');
+  setTaskSaveState('saved', '已保存');
+  renderTasks();
+  taskTitleEl.focus();
+}
+
+function closeTaskEditor() {
+  currentTaskId = null;
+  $('task-edit').classList.add('hidden');
+  $('task-empty').classList.remove('hidden');
+  renderTasks();
+}
+
+let taskSaveFailed = false;
+
+async function saveTaskNow() {
+  if (currentTaskId === null) return;
+  const cur = tasks.find((t) => t.id === currentTaskId);
+  const status = cur ? cur.status : 'todo';   // 完成状态在 toggleTask 里单独改
+  setTaskSaveState('saving', '保存中…');
+  try {
+    await api(`/api/tasks/${currentTaskId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        title: taskTitleEl.value,
+        status,
+        due_date: taskDueEl.value,
+      }),
+    });
+  } catch (e) {
+    taskSaveFailed = true;
+    setTaskSaveState('error', '保存失败，点此重试');
+    showBanner(`没能保存任务：${e.message}。你的内容还在输入框里，恢复服务后再点重试。`);
+    return;
+  }
+  taskSaveFailed = false;
+  hideBanner();
+  const t = new Date();
+  setTaskSaveState('saved', `已保存 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`);
+  await loadTasks();             // 刷新列表，标题和排序跟着更新
+}
+
+function scheduleTaskSave() {
+  setTaskSaveState('', '编辑中…');
+  clearTimeout(taskSaveTimer);
+  taskSaveTimer = setTimeout(saveTaskNow, 800);
+}
+
+async function createTask() {
+  let t;
+  try {
+    t = await api('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ title: '未命名任务', due_date: '' }),
+    });
+  } catch (e) {
+    showBanner(`新建任务失败：${e.message}`);
+    return;
+  }
+  searchEl.value = '';           // 清掉搜索，保证新任务在列表里可见
+  await loadTasks('');
+  openTask(t.id);
+}
+
+// 勾选框：完成 / 取消完成
+// 先在本地改好再发请求，点完立刻有反馈，不用等网络来回。
+async function toggleTask(id) {
+  const t = tasks.find((x) => x.id === id);
+  if (!t) return;
+  const next = t.status === 'done' ? 'todo' : 'done';
+
+  // 正在看这条任务的话，编辑区里的按钮文案要跟着换
+  if (id === currentTaskId) {
+    taskToggleBtn.textContent = next === 'done' ? '恢复为待办' : '标记完成';
+    taskToggleBtn.classList.toggle('unmark', next === 'done');
+  }
+  t.status = next;
+  renderTasks();
+  // 闪一下绿，告诉用户「点生效了」
+  const el = taskListEl.querySelector(`.item[data-id="${id}"]`);
+  if (el && next === 'done') {
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 900);
+  }
+
+  try {
+    await api(`/api/tasks/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ title: t.title, status: next, due_date: t.due_date || '' }),
+    });
+  } catch (e) {
+    t.status = t.status === 'done' ? 'todo' : 'done';   // 失败就改回去
+    renderTasks();
+    showBanner(`更新失败：${e.message}`);
+    return;
+  }
+  await loadTasks();
+}
+
+// 删除：和笔记一样是行内二次确认
+let taskConfirmArmed = false;
+
+function taskArmDelete() {
+  taskConfirmArmed = true;
+  taskDelBtn.textContent = '确认删除？';
+  taskDelBtn.classList.add('armed');
+  taskCancelBtn.classList.remove('hidden');
+}
+
+function taskDisarmDelete() {
+  taskConfirmArmed = false;
+  taskDelBtn.textContent = '删除';
+  taskDelBtn.classList.remove('armed');
+  taskCancelBtn.classList.add('hidden');
+}
+
+taskDelBtn.addEventListener('click', async () => {
+  if (currentTaskId === null) return;
+  if (!taskConfirmArmed) { taskArmDelete(); return; }   // 第一次点：只是进入待确认
+
+  const id = currentTaskId;
+  const t = tasks.find((x) => x.id === id);
+  taskDisarmDelete();
+  try {
+    await api(`/api/tasks/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    showBanner(`删除失败：${e.message}`);
+    return;               // 失败了就不关编辑区，任务还在，可以重试
+  }
+  closeTaskEditor();
+  await loadTasks();
+  showUndo({ id, kind: 'task', title: t ? t.title : '这条任务' });
+});
+
+taskCancelBtn.addEventListener('click', taskDisarmDelete);
+
+// 任务标题和截止日期变化 → 自动保存
+taskTitleEl.addEventListener('input', scheduleTaskSave);
+taskDueEl.addEventListener('input', scheduleTaskSave);
+// 点编辑区里的「标记完成」大按钮，走的是同一个 toggleTask
+taskToggleBtn.addEventListener('click', () => {
+  if (currentTaskId !== null) toggleTask(currentTaskId);
+});
+taskStateEl.addEventListener('click', () => {
+  if (taskSaveFailed) { clearTimeout(taskSaveTimer); saveTaskNow(); }
+});
+
+// 点左侧列表：勾选框单独处理，其它位置是打开这条任务
+taskListEl.addEventListener('click', (e) => {
+  const chk = e.target.closest('.check');
+  if (chk) { e.stopPropagation(); toggleTask(Number(chk.dataset.toggle)); return; }
+  const item = e.target.closest('.item');
+  if (item) openTask(Number(item.dataset.id));
+});
+
+$('new-task').addEventListener('click', createTask);
+
+// ============ 视图切换（笔记 / 任务） ============
+// 切之前一定要把当前视图没存完的内容补存一次，
+// 否则「刚打了一半标题就切走」会丢掉最后那 800ms 的输入。
+let view = 'notes';
+
+async function flushSaves() {
+  const jobs = [];
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; jobs.push(saveNow()); }
+  if (taskSaveTimer) { clearTimeout(taskSaveTimer); taskSaveTimer = null; jobs.push(saveTaskNow()); }
+  await Promise.all(jobs);
+}
+
+async function setView(v) {
+  if (v === view) return;
+  await flushSaves();      // 等补存完成再切，免得两个列表的请求交叉
+  view = v;
+
+  // 必须用 classList 增删（见坑 #7）：直接赋 className 会把 hidden 一起抹掉
+  document.querySelectorAll('#view-switch button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.view === v));
+  $('editor').classList.toggle('hidden', v !== 'notes');
+  $('task-pane').classList.toggle('hidden', v !== 'tasks');
+  $('note-list').classList.toggle('hidden', v !== 'notes');
+  $('task-list').classList.toggle('hidden', v !== 'tasks');
+  $('new-note').classList.toggle('hidden', v !== 'notes');
+  $('new-task').classList.toggle('hidden', v !== 'tasks');
+  searchEl.value = '';           // 换视图时清掉搜索词：搜笔记的词留到任务页只会让人以为笔记丢了
+  searchEl.placeholder = v === 'notes' ? '搜索标题和正文…' : '搜索任务标题…';
+  renderHints();
+  hideToast();
+  if (v === 'notes') loadList(); else loadTasks();
+}
+
+document.querySelectorAll('#view-switch button').forEach((b) => {
+  b.addEventListener('click', () => setView(b.dataset.view));
+});
+
+// 底部快捷键提示会随视图变，不然会提示「新建笔记」但你在任务页
+const HINTS = {
+  notes: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>' +
+         '<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭',
+  tasks: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 新建　<kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索<br>' +
+         '<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存　<kbd>Esc</kbd> 关闭',
+};
+function renderHints() { $('hints').innerHTML = HINTS[view]; }
 
 // ============ 键盘快捷键 ============
 // 注意：Ctrl+N（浏览器新窗口）和 Ctrl+F（浏览器查找）是 Chrome 的保留键，
@@ -1038,32 +1485,42 @@ searchEl.addEventListener('input', () => {
 document.addEventListener('keydown', (e) => {
   // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
   if (e.key === 'Escape') {
+    if (taskConfirmArmed) { taskDisarmDelete(); return; }
     if (confirmArmed) { disarmDelete(); return; }
     if (!$('toast').classList.contains('hidden')) { hideToast(); return; }
-    if (searchEl.value) { searchEl.value = ''; loadList(); searchEl.blur(); return; }
+    if (searchEl.value) { searchEl.value = ''; view === 'tasks' ? loadTasks('') : loadList(''); searchEl.blur(); return; }
+    if (view === 'tasks') { if (currentTaskId !== null) closeTaskEditor(); return; }
     if (currentId !== null) { closeEditor(); }
     return;
   }
 
   if (!(e.ctrlKey || e.metaKey)) return;   // mac 上是 Cmd，这里一起支持
 
-  if (e.key === 'Enter') {                // 新建
+  if (e.key === 'Enter') {                // 新建：跟着当前视图走
     e.preventDefault();
-    createNote();
+    view === 'tasks' ? createTask() : createNote();
   } else if (e.key === 'k' || e.key === 'K') {   // 搜索
     e.preventDefault();
     searchEl.focus();
     searchEl.select();
-  } else if (e.key === 'b' || e.key === 'B') {   // 粗体
+  } else if (e.key === 'b' || e.key === 'B') {   // 粗体（只在笔记视图有意义）
+    if (view !== 'notes') return;
     e.preventDefault();
     wrap('**', '**', '粗体');
   } else if (e.key === 'i' || e.key === 'I') {   // 斜体
+    if (view !== 'notes') return;
     e.preventDefault();
     wrap('*', '*', '斜体');
   } else if (e.key === 's' || e.key === 'S') {   // 保存
     e.preventDefault();
-    if (currentId !== null) {
-      clearTimeout(saveTimer);            // 取消待执行的自动保存，现在就存
+    if (view === 'tasks') {
+      if (currentTaskId !== null) {
+        clearTimeout(taskSaveTimer);      // 取消待执行的自动保存，现在就存
+        taskSaveTimer = null;
+        saveTaskNow();
+      }
+    } else if (currentId !== null) {
+      clearTimeout(saveTimer);
       saveTimer = null;
       saveNow();
     }
@@ -1073,8 +1530,8 @@ document.addEventListener('keydown', (e) => {
 // 页面关闭前把没存完的内容补存一次；
 // 如果上次保存失败过，就拦一下，别让用户稀里糊涂丢掉内容。
 window.addEventListener('beforeunload', (e) => {
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; saveNow(); }
-  if (saveFailed) {
+  flushSaves();
+  if (saveFailed || taskSaveFailed) {
     e.preventDefault();
     e.returnValue = '';        // 浏览器会弹出「确认离开」提示
   }
@@ -1082,7 +1539,8 @@ window.addEventListener('beforeunload', (e) => {
 
 // ============ 启动 ============
 setMode(mode);
-loadList();
+renderHints();
+view === 'tasks' ? loadTasks() : loadList();
 </script>
 </body>
 </html>

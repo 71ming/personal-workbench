@@ -30,6 +30,50 @@ if (!cols.includes('deleted_at')) {
   console.log('已升级数据库：新增 deleted_at 字段（软删除）');
 }
 
+// ============ v2 新增：任务（独立的表） ============
+// 为什么单独建表而不往 notes 里加字段：
+// 一张表一个概念。任务是「要做的事」，笔记是「写下来的东西」，
+// 字段、排序方式、生命周期都不一样。等 v3 要做关联时，混在一张表里就会乱。
+// （这条是方案.md 里明确写的设计约定）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    title        TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'todo',          -- 'todo' 待办 / 'done' 已完成
+    due_date     TEXT,                                 -- 截止日期 'YYYY-MM-DD'，空表示不设
+    completed_at TEXT,                                 -- 完成时间，取消完成就清空
+    created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    deleted_at   TEXT                                  -- 软删除，和笔记一个套路
+  );
+`);
+
+// 任务也一样做软删除：任务往往比笔记更误删（手滑就点掉了），留着后悔药
+const tq = {
+  list: db.prepare(`
+    SELECT * FROM tasks WHERE deleted_at IS NULL
+    ORDER BY (status = 'done') ASC,          -- 未完成排前面
+             (due_date IS NULL) ASC,        -- 有截止日期的排前面
+             due_date ASC,                   -- 越早到期越靠前，逾期的自然浮到最上面
+             created_at ASC`),
+  search: db.prepare(`
+    SELECT * FROM tasks WHERE deleted_at IS NULL AND title LIKE ?
+    ORDER BY (status = 'done') ASC, (due_date IS NULL) ASC, due_date ASC, created_at ASC`),
+  get:      db.prepare('SELECT * FROM tasks WHERE id = ?'),
+  create:   db.prepare("INSERT INTO tasks (title,due_date) VALUES (?,?)"),
+  // completed_at 的处理写进 SQL：完成时保留原完成时间（重复保存不会刷时间），
+  // 取消完成就置空。放在 SQL 里做，避免先读后写时序出错。
+  update:   db.prepare(`UPDATE tasks SET title=?, status=?, due_date=?,
+                        completed_at = CASE WHEN ?='done'
+                          THEN COALESCE(completed_at, datetime('now','localtime'))
+                          ELSE NULL END,
+                        updated_at=datetime('now','localtime')
+                        WHERE id=? AND deleted_at IS NULL`),
+  softDel:  db.prepare("UPDATE tasks SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
+  restore:  db.prepare('UPDATE tasks SET deleted_at=NULL WHERE id=?'),
+  allForExport: db.prepare("SELECT title,status,due_date,completed_at,created_at FROM tasks WHERE deleted_at IS NULL ORDER BY (status='done') ASC, (due_date IS NULL) ASC, due_date ASC"),
+};
+
 // 软删除：不真删，只打一个删除时间戳，撤销就是把时间戳清空。
 // 这样误删之后还能捞回来 —— 这是个人笔记库最需要的一个保险。
 const q = {
@@ -44,6 +88,13 @@ const q = {
 };
 
 // ---------- 工具 ----------
+// 截止日期归一化：只认 YYYY-MM-DD，其余一律当成「不设截止」。
+// 前端 <input type="date"> 交上来就是这个格式，但接口是公开的，别直接拼进 SQL。
+function normDue(v) {
+  const s = String(v ?? '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
 const send = (res, code, data) => {
   const body = JSON.stringify(data);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -68,13 +119,15 @@ const readBody = (req) => new Promise((resolve, reject) => {
 // 以后想迁到别的工具也读得懂。这是你唯一一份「不在数据库里」的副本。
 function buildMarkdown() {
   const notes = q.allForExport.all();
+  const tasks = tq.allForExport.all();
   const today = new Date();
   const stamp = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+  const doneCount = tasks.filter((t) => t.status === 'done').length;
   const lines = [
     `# 个人工作台 · 导出备份`,
     ``,
     `> 导出时间：${today.toLocaleString('zh-CN')}`,
-    `> 共 ${notes.length} 条笔记`,
+    `> 共 ${notes.length} 条笔记${tasks.length ? `，${tasks.length} 条任务（已完成 ${doneCount}）` : ''}`,
     ``,
     `---`,
     ``,
@@ -84,6 +137,20 @@ function buildMarkdown() {
     lines.push(`# ${n.title.replace(/\s*\n\s*/g, ' ')}`, ``);
     lines.push(`> 创建：${n.created_at}　修改：${n.updated_at}`, ``);
     lines.push(n.body || '', ``, `---`, ``);
+  }
+
+  // 任务也必须进备份。这里用 Markdown 的任务列表语法：
+  // - [ ] 是待办，- [x] 是已完成，勾选框在记事本/大多数编辑器里都能认出来。
+  // 一条任务都没有时就不写这一节，导出内容和加任务之前完全一样。
+  if (tasks.length) {
+    lines.push(`# 任务`, ``);
+    for (const t of tasks) {
+      const box = t.status === 'done' ? '[x]' : '[ ]';
+      const due = t.due_date ? `　（截止 ${t.due_date}）` : '';
+      const done = t.status === 'done' && t.completed_at ? `　（完成于 ${t.completed_at}）` : '';
+      lines.push(`- ${box} ${t.title}${due}${done}`);
+    }
+    lines.push(``, `---`, ``);
   }
   return { text: lines.join('\n'), stamp };
 }
@@ -150,6 +217,56 @@ async function api(req, res, url) {
     // 软删除
     if (req.method === 'DELETE') {
       q.softDel.run(id);
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  // ============ 任务接口 ============
+  // 结构和笔记一模一样，刻意保持一致：以后加功能时照着抄一遍就行，不用重新想。
+
+  // 任务列表 / 搜索
+  if (req.method === 'GET' && url.pathname === '/api/tasks') {
+    const s = url.searchParams.get('search')?.trim();
+    if (s) return send(res, 200, tq.search.all(`%${s}%`));
+    return send(res, 200, tq.list.all());
+  }
+
+  // 新建任务
+  if (req.method === 'POST' && url.pathname === '/api/tasks') {
+    const { title = '', due_date = '' } = await readBody(req);
+    const info = tq.create.run(title.trim() || '未命名任务', normDue(due_date));
+    return send(res, 200, tq.get.get(info.lastInsertRowid));
+  }
+
+  // 读取 / 更新 / 删除单条任务
+  if (seg[0] === 'api' && seg[1] === 'tasks' && seg[2]) {
+    const id = Number(seg[2]);
+    if (!Number.isInteger(id)) return send(res, 400, { error: 'bad id' });
+
+    if (req.method === 'GET') {
+      const task = tq.get.get(id);
+      return task ? send(res, 200, task) : send(res, 404, { error: 'not found' });
+    }
+    // 更新：标题、完成状态、截止日期一起存
+    // 前端自动保存每次都带全三个字段，所以这里不做局部更新，避免漏字段
+    if (req.method === 'PUT') {
+      const { title = '', status = 'todo', due_date = '' } = await readBody(req);
+      const st = status === 'done' ? 'done' : 'todo';   // 只认这两个值
+      tq.update.run(title.trim() || '未命名任务', st, normDue(due_date), st, id);
+      const task = tq.get.get(id);
+      if (!task || task.deleted_at) return send(res, 404, { error: 'not found' });
+      return send(res, 200, task);
+    }
+    // 撤销删除
+    if (req.method === 'POST' && seg[3] === 'restore') {
+      tq.restore.run(id);
+      const task = tq.get.get(id);
+      if (!task) return send(res, 404, { error: 'not found' });
+      return send(res, 200, task);
+    }
+    // 软删除
+    if (req.method === 'DELETE') {
+      tq.softDel.run(id);
       return send(res, 200, { ok: true });
     }
   }
