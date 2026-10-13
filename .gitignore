@@ -1,0 +1,9 @@
+# 数据库文件（含全部笔记数据，不进版本库）
+data/
+
+# 系统与编辑器杂项
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
