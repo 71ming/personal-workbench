@@ -725,6 +725,209 @@ async function handleAiModels(req, res) {
   });
 }
 
+// ============ v3：调用模型（OpenAI 兼容协议）===========
+// 这一步写的是**一个**调用器，六家共用。原因是这六家都实现了同一套协议：
+//   POST {base_url}/chat/completions
+//   Authorization: Bearer <key>
+//   { model, messages: [{role, content}], max_tokens }
+//   返回 { choices:[{message:{content}}], usage:{prompt_tokens, completion_tokens} }
+// 厂商切换因此是「改一个配置项」，不是「换一套代码」。这是当初选型时的主要理由。
+//
+// —— 为什么一律不重试 ——
+// 抓网页那次是**幂等**的（GET，重复抓一次不花钱），所以重试无脑做。
+// 调模型是**生成类**的：请求已经送到对方服务器，网络在半路断掉时，
+// 对方很可能已经算完并计费了。再发一次就是花两次钱拿一次回答。
+// 这里只对「连接都没建起来」的情况重试一次（DNS 抖动、连接被拒）——
+// 那种情况对方肯定没收到，不会重复计费。
+//
+// —— 为什么不写流式 ——
+// 流式要处理 SSE 分片、重连、以及「断了一半怎么接着显示」。
+// 本地小工具一问一答，用不着；先把非流式的正确性做扎实。
+
+const AI_CHAT_TIMEOUT = 90000;   // 90 秒：模型要思考，比列模型慢得多
+
+// max_tokens 必须给，而且要**小**。
+// 不给的话，某些模型会一路写下去直到撞上下文上限 —— 那是拿你的钱赌。
+// 问笔记不需要长篇大论，2000 字足够塞下好几个问题的答案。
+const AI_MAX_TOKENS = 2000;
+
+// 价格表。**这是一份会过期的快照，不要当权威。**
+// 这次查证（2026-10）就发现同一个 GLM-4.7-Flash 在不同站点上写着
+// $0.07/$0.40 和「免费」两种价，明显有一处已经不准了。
+// 所以这里的处理方式是：
+//   - 查到了就估算，并标出是哪天查的、提醒以账单为准；
+//   - 查不到就说「价格未收录」，**只报 token 数**，绝不编一个数字出来。
+// token 数来自服务商返回的 usage，那才是准确的；价格只是折算，错了也不影响判断。
+const AI_PRICES = {
+  // 元 / 百万 tokens。查证日期：2026-10-14。来源：各家官方定价页。
+  'deepseek-flash':   { in: 1.01, out: 2.02, date: '2026-10-14', note: '闲时（低峰期）价格减半' },
+  'deepseek-v4-pro':  { in: 3.13, out: 6.26, date: '2026-10-14', note: '闲时价格减半' },
+  'qwen3.8-flash':    { in: 0.80, out: 2.70, date: '2026-10-14' },
+  'qwen3.7-plus':     { in: 1.20, out: 3.60, date: '2026-10-14' },
+  'qwen3.8-max':      { in: 14.0, out: 42.0, date: '2026-10-14' },
+  'doubao-seed-2.0-mini': { in: 0.20, out: 2.00, date: '2026-10-14', note: '豆包按接入点计费，此为同档参考价' },
+  'kimi-k3':          { in: 4.00, out: 20.0, date: '2026-10-14' },
+  'glm-5.3-flash':    { in: 0.65, out: 2.00, date: '2026-10-14' },
+  // GLM-4.7-Flash 暂不收录：查到两个互相矛盾的价格（$0.07/$0.40 vs 免费），
+  // 与其赌一个，不如让界面只报 token 数。
+};
+
+// 估算这次调用花了多少钱（元）。返回 null = 这个模型的价格没收录。
+function estimateCost(model, promptTokens, completionTokens) {
+  const pr = AI_PRICES[String(model || '').trim().toLowerCase()];
+  if (!pr) return null;
+  // 除以 100 万是因为价格单位是「每百万 tokens」
+  const yuan = (promptTokens / 1e6) * pr.in + (completionTokens / 1e6) * pr.out;
+  return {
+    yuan: Number(yuan.toFixed(6)),
+    price_date: pr.date,
+    note: pr.note || '',
+  };
+}
+
+// 把服务商的 HTTP 错误翻译成人能看懂的话，并分好类。
+// 分类的意义：401 是「密钥错了，去设置里改」，模型不对是「重新检测一下」，
+// 超时是「网络慢，再试一次」。几种情况的处理完全不同，不能都报一句「失败了」。
+//
+// 有个坑：**各家对「模型不存在」用的状态码不一样**。
+// 智谱返回的是 400 + 中文「模型不存在」，不是 404。
+// 所以光看状态码会漏掉这一类，必须也看错误内容 —— 这是第一次实测抓出来的。
+function aiClassifyError(status, detail) {
+  const d = String(detail || '').trim();
+  if (status === 401 || status === 403) {
+    return { kind: 'auth', text: '密钥无效或没权限。去「AI」设置里检查一下。' + (d ? '（' + d + '）' : '') };
+  }
+  // 模型名不对：404 是标准做法，但也有厂商用 400 + 一句中文说明。
+  if (status === 404 || /模型不存在|无可用模型|model .{0,20}not (found|exist)|invalid model|unknown model/i.test(d)) {
+    return {
+      kind: 'model',
+      text: '模型名不对。点「检测模型」重新选一个。' + (d ? '（' + d + '）' : ''),
+    };
+  }
+  if (status === 429) {
+    return { kind: 'rate', text: '被限流或余额不足，等一会儿再试。' + (d ? '（' + d + '）' : '') };
+  }
+  if (status >= 500) {
+    return { kind: 'server', text: '对方服务出问题了（' + status + '），这是他们那边的问题，可以重试。' };
+  }
+  return { kind: 'http', text: '对方返回 ' + status + (d ? '：' + d : '') };
+}
+
+// 真正发一次请求。
+// 返回 { ok:true, content, usage, cost } 或 { ok:false, kind, error }。
+// 注意：**key 从配置里读，调用方不传**。就算接口是公开的，也不能让密钥从参数进来 ——
+// 那意味着任何能访问这个接口的东西都能用它去调模型。
+async function callModel(providerId, model, systemPrompt, userPrompt) {
+  const p = findProvider(providerId);
+  if (!p) return { ok: false, kind: 'config', error: '不认识的服务商' };
+
+  const cfg = readAiConfig();
+  const key = cfg.apiKey;
+  if (!key) return { ok: false, kind: 'config', error: '还没保存密钥' };
+  if (!model) return { ok: false, kind: 'config', error: '还没填模型名' };
+
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    max_tokens: AI_MAX_TOKENS,
+    stream: false,
+  };
+
+  // 请求参数只写一处。下面要重试，同样的东西不该抄两遍 ——
+  // 抄两遍就一定会有一遍漏改（这次就漏了 method: 'POST'，
+  // Node 的 fetch 默认 GET，带 body 直接被服务端拒绝）。
+  const request = () => fetch(p.base_url.replace(/\/+$/, '') + '/chat/completions', {
+    method: 'POST',                      // 不写默认是 GET，GET 不能带 body
+    signal: AbortSignal.timeout(AI_CHAT_TIMEOUT),
+    headers: {
+      'authorization': `Bearer ${key}`,
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  let resp;
+  try {
+    resp = await request();
+  } catch (e) {
+    const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    if (timedOut) {
+      return {
+        ok: false, kind: 'timeout',
+        error: `等了 ${AI_CHAT_TIMEOUT / 1000} 秒还没回。可能是模型在思考很久，也可能网络断了。`,
+      };
+    }
+    // 连接都没建起来，对方肯定没收到请求，重试一次不花钱
+    try {
+      resp = await request();
+    } catch (e2) {
+      return { ok: false, kind: 'network', error: '连不上 ' + p.name + '：' + (e2.message || '网络错误') };
+    }
+  }
+
+  let json = null;
+  let rawText = '';
+  try {
+    rawText = await resp.text();
+    json = JSON.parse(rawText);
+  } catch { /* 不是 JSON 就当错误信息处理 */ }
+
+  if (!resp.ok) {
+    const detail = json?.error?.message || json?.message || rawText.slice(0, 200);
+    const e = aiClassifyError(resp.status, detail);
+    return { ok: false, kind: e.kind, error: e.text, status: resp.status };
+  }
+
+  const content = json?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    // 返回了 200 但没有内容。这通常意味着模型触发了内容过滤，
+    // 或者请求里少了 messages。两种都不该假装成功。
+    return {
+      ok: false, kind: 'empty',
+      error: '对方返回了 200 但没有内容' +
+        (json?.error?.message ? '（' + json.error.message + '）' : '，可能是内容被过滤了'),
+    };
+  }
+
+  const usage = {
+    prompt_tokens: Number(json?.usage?.prompt_tokens) || 0,
+    completion_tokens: Number(json?.usage?.completion_tokens) || 0,
+  };
+  usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+
+  return {
+    ok: true,
+    content,
+    usage,
+    cost: estimateCost(model, usage.prompt_tokens, usage.completion_tokens),
+    // 对方认的这个模型名（有时它会把它映射到具体版本），
+    // 记下来让界面能显示「你填的是 A，其实跑的是 B」
+    returned_model: json?.model || model,
+    finish_reason: json?.choices?.[0]?.finish_reason || '',
+  };
+}
+
+// 试一句最短的话，用来验证「密钥 + 模型名 + 网络」这三样通不通。
+// 刻意不喂笔记、不带任何用户数据 —— 这个按钮存在的意义只是连通性测试。
+const AI_TEST_PROMPT =
+  '你好。这是一条连通性测试，你只需要回复四个字：连接正常。不要多说别的。';
+
+async function handleAiTest(req, res) {
+  const cfg = readAiConfig();
+  const r = await callModel(cfg.provider, cfg.model, '你是一个只需要简短回答的助手。', AI_TEST_PROMPT);
+  if (!r.ok) return send(res, 200, { ...r, config: aiConfigPublic() });
+
+  // 如果对方认的模型名跟填的不一样，明确说出来。
+  // 这种情况不少见（厂商把小模型名映射到大模型），不提示的话
+  // 成本估算可能算在便宜的档上，实际却在按贵的收费。
+  const mismatch = r.returned_model && r.returned_model.toLowerCase() !== String(cfg.model).toLowerCase();
+  return send(res, 200, { ...r, mismatch, config: aiConfigPublic() });
+}
+
 // ---------- 导出：把全部笔记拼成一个 Markdown 文件 ----------
 // 为什么用 Markdown 而不是自定义格式：任何编辑器、记事本、Git 都能直接看，
 // 以后想迁到别的工具也读得懂。这是你唯一一份「不在数据库里」的副本。
@@ -860,6 +1063,11 @@ async function api(req, res, url) {
   // 列出这家服务商当前可用的模型（要密钥，不花钱，不产生对话内容）
   if (req.method === 'POST' && url.pathname === '/api/ai/models') {
     return await handleAiModels(req, res);
+  }
+
+  // 测试连通性：发一句最短的话，不带任何笔记内容
+  if (req.method === 'POST' && url.pathname === '/api/ai/test') {
+    return await handleAiTest(req, res);
   }
 
   // 笔记列表 / 搜索

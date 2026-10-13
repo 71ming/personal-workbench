@@ -681,6 +681,23 @@
   .ai-chip.current { border-color: var(--accent); background: var(--accent); color: #fff; }
   .ai-detect-err { font-size: 12px; color: var(--danger); line-height: 1.65; }
 
+  /* ---- 测试连接的结果块 ---- */
+  .ai-test-box {
+    margin-top: 14px; padding: 11px 13px; border-radius: 6px;
+    font-size: 12.5px; line-height: 1.75;
+    background: #f2f8f4; border: 1px solid #cfe6d6; color: #1a5c38;
+  }
+  .ai-test-box.fail { background: #fdeeee; border-color: #f5cccc; color: #9c2c2c; }
+  .ai-test-box .ai-test-title { font-weight: 600; }
+  /* token / 费用明细用等宽数字对齐，扫一眼就能看出量级 */
+  .ai-test-box dl {
+    margin: 7px 0 0; display: grid; grid-template-columns: auto 1fr;
+    gap: 2px 12px; font-size: 11.5px; opacity: .92;
+  }
+  .ai-test-box dt { white-space: nowrap; }
+  .ai-test-box dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .ai-test-box .ai-test-note { margin-top: 6px; font-size: 11px; opacity: .8; }
+
 </style>
 </head>
 <body>
@@ -910,8 +927,14 @@
 
     <div id="ai-pending-box"></div>
 
+    <!-- 测试连接的结果。单独一块，因为它要显示的不只是成功/失败，
+         还有花了多少 token、大概多少钱 —— 这些才是「敢不敢用」的依据。
+         放在 footer 之上：footer 有上边框当分隔，插在下面会显得断开。 -->
+    <div class="ai-test-box hidden" id="ai-test-box"></div>
+
     <div class="ai-foot">
       <span class="ai-foot-msg" id="ai-foot-msg"></span>
+      <button class="btn" id="ai-test" type="button" title="发一句最短的话，看看密钥、模型和网络通不通">测试连接</button>
       <button class="btn danger" id="ai-reset">全部清除</button>
       <button class="btn" id="ai-cancel">取消</button>
       <button class="btn-primary" id="ai-save">保存</button>
@@ -2734,6 +2757,8 @@ async function openAiDialog() {
     $('ai-key-state').innerHTML = cfg.has_key
       ? `已保存密钥 <b>${esc(cfg.key_preview)}</b>。留空这一栏就是不改它。`
       : '还没保存过密钥。';
+    $('ai-test-box').classList.add('hidden');
+    $('ai-test-box').innerHTML = '';
 
     $('ai-pending-box').innerHTML = data.pending.length
       ? `<div class="ai-pending">暂时用不了：${data.pending
@@ -2803,6 +2828,85 @@ $('ai-save').addEventListener('click', async () => {
   } catch (e) {
     aiFootMsg(e.message, 'err');
   }
+});
+
+// ---- 测试连接 ----
+// 这个按钮验证的是「**已经保存**的配置」能不能真的跑通，不是验证输入框里的内容。
+// 所以输入框里改了东西还没保存时，必须说清楚 —— 否则用户以为测的是新填的，
+// 实际测的是旧的，白排查半天。
+//
+// 它做的事：发一句最短的话（后端写死，不带任何笔记内容），然后把
+// 「通了没有 / 花了多少 token / 大概多少钱」如实报出来。
+async function aiTestConnection() {
+  const btn = $('ai-test');
+  const box = $('ai-test-box');
+  btn.classList.add('loading');
+
+  try {
+    const r = await api('/api/ai/test', { method: 'POST' });
+
+    if (!r.ok) {
+      box.className = 'ai-test-box fail';
+      // 按 kind 给不同的下一步建议，而不是干巴巴一句「失败」
+      const advice = {
+        auth: '去服务商控制台确认密钥是不是复制全了、有没有激活。',
+        model: '回到上面点「检测模型」，从它列出来的里面挑一个。',
+        rate: '等几分钟再试，或者换一个模型试试。',
+        timeout: '网络可能不太稳，可以再点一次。',
+        network: '检查一下网络连接。',
+        config: '先把服务商、模型名、密钥都填好并保存。',
+        server: '这是服务商那边的问题，过一会儿再试。',
+        empty: '换个模型试试，有些模型对内容有过滤。',
+      }[r.kind] || '';
+      box.innerHTML = `<div class="ai-test-title">没跑通</div><div>${esc(r.error || '未知错误')}</div>` +
+        (advice ? `<div class="ai-test-note">${esc(advice)}</div>` : '');
+      box.classList.remove('hidden');
+      return;
+    }
+
+    // 成功：把用量和费用摊开写清楚。「敢不敢一直用」靠的是这几个数，不是「成功」两个字。
+    const u = r.usage || {};
+    const rows = [];
+    rows.push(['这次用量', `${u.prompt_tokens || 0} 进 + ${u.completion_tokens || 0} 出 = ${u.total_tokens || 0} tokens`]);
+    if (r.cost) {
+      // 价格低到要换算才看得清，直接显示 0.0001 元会让人以为是 bug
+      const y = r.cost.yuan;
+      rows.push(['大概花费', y >= 0.01 ? `约 ${y.toFixed(4)} 元` : `约 ${y.toFixed(6)} 元（不到一毛钱）`]);
+    } else {
+      rows.push(['大概花费', '这个模型的价格我没收录，只能报 token 数']);
+    }
+    rows.push(['实际跑的模型', r.returned_model || '—']);
+
+    const notes = [];
+    if (r.cost) notes.push(`价格查证于 ${r.cost.price_date}，实际以服务商账单为准${r.cost.note ? '；' + r.cost.note : ''}`);
+    if (r.mismatch) notes.push('注意：你填的模型名和它实际跑的对不上，成本可能算低了');
+    // 被截断是有信息量的 —— 静默截断会让人以为模型就这么点能耐
+    if (r.finish_reason === 'length') notes.push('这次回答被长度上限截断了');
+
+    box.className = 'ai-test-box';
+    box.innerHTML = `<div class="ai-test-title">跑通了 ✓</div>` +
+      `<dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` +
+      (notes.length ? `<div class="ai-test-note">${esc(notes.join('；'))}</div>` : '');
+    box.classList.remove('hidden');
+  } catch (e) {
+    box.className = 'ai-test-box fail';
+    box.innerHTML = `<div class="ai-test-title">没跑通</div><div>${esc(e.message)}</div>`;
+    box.classList.remove('hidden');
+  } finally {
+    btn.classList.remove('loading');
+  }
+}
+
+$('ai-test').addEventListener('click', () => {
+  // 有没保存的改动就提醒一句，免得白测
+  const typed = $('ai-key').value.trim();
+  if (typed) {
+    if (!confirm('输入框里的密钥还没保存。测试用的是「已保存的配置」。要先保存再测吗？')) return;
+    $('ai-save').click();
+    // 保存是异步的，这里先退出。等用户再点一次测试
+    return;
+  }
+  aiTestConnection();
 });
 
 // 「全部清除」要防手滑 —— 一次点击就把密钥和服务商都清掉，代价不小
