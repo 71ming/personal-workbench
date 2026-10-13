@@ -90,6 +90,18 @@
   }
   #search::-webkit-search-cancel-button { cursor: pointer; }
 
+  /* 顶部右侧的次要操作按钮 */
+  .head-actions { margin-left: auto; }
+  #export-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
+    color: var(--text-sub); background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    transition: all .15s;
+  }
+  #export-btn:hover { background: #f4f5f7; color: var(--text); }
+  #export-btn svg { width: 14px; height: 14px; }
+
   /* ================= 主体两栏 ================= */
   main { flex: 1; display: flex; min-height: 0; }
 
@@ -247,6 +259,16 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
            stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
       <input id="search" type="search" placeholder="搜索标题和正文…">
+    </div>
+    <div class="head-actions">
+      <!-- 导出备份：数据全在数据库文件里，这是唯一一份能在别处打开的副本 -->
+      <button id="export-btn" title="把全部笔记导出成一个 Markdown 文件">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>
+        </svg>
+        导出备份
+      </button>
     </div>
   </header>
 
@@ -535,6 +557,24 @@ listEl.addEventListener('click', (e) => {
 
 // 点「新建笔记」
 $('new-note').addEventListener('click', createNote);
+
+// 导出备份
+// 关键：导出前必须先把正在编辑的内容存下去，否则刚写的那几条会漏掉，
+// 导出会是一份「看起来完整、其实少了最新内容」的备份。
+$('export-btn').addEventListener('click', async () => {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await saveNow(); }
+  if (saveFailed) {
+    showBanner('有内容没能保存，导出的是较早的版本。恢复服务后再导出一次。');
+  }
+  // 用临时 <a download> 触发下载，而不是 location.href。
+  // 后者一旦出错（比如返回 404）会把整个工作台导航走，正在写的内容就没了。
+  const a = document.createElement('a');
+  a.href = '/api/export';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
 
 // 标题和正文变化 → 自动保存
 titleEl.addEventListener('input', scheduleSave);

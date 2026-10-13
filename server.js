@@ -29,6 +29,7 @@ const q = {
   create:   db.prepare('INSERT INTO notes (title,body) VALUES (?,?)'),
   update:   db.prepare('UPDATE notes SET title=?, body=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?'),
   del:      db.prepare('DELETE FROM notes WHERE id = ?'),
+  allForExport: db.prepare('SELECT title,body,created_at,updated_at FROM notes ORDER BY created_at ASC'),
 };
 
 // ---------- 工具 ----------
@@ -51,9 +52,51 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
+// ---------- 导出：把全部笔记拼成一个 Markdown 文件 ----------
+// 为什么用 Markdown 而不是自定义格式：任何编辑器、记事本、Git 都能直接看，
+// 以后想迁到别的工具也读得懂。这是你唯一一份「不在数据库里」的副本。
+function buildMarkdown() {
+  const notes = q.allForExport.all();
+  const today = new Date();
+  const stamp = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+  const lines = [
+    `# 个人工作台 · 导出备份`,
+    ``,
+    `> 导出时间：${today.toLocaleString('zh-CN')}`,
+    `> 共 ${notes.length} 条笔记`,
+    ``,
+    `---`,
+    ``,
+  ];
+  for (const n of notes) {
+    // 标题里的换行会破坏 Markdown 结构，统一压成空格
+    lines.push(`# ${n.title.replace(/\s*\n\s*/g, ' ')}`, ``);
+    lines.push(`> 创建：${n.created_at}　修改：${n.updated_at}`, ``);
+    lines.push(n.body || '', ``, `---`, ``);
+  }
+  return { text: lines.join('\n'), stamp };
+}
+
+function handleExport(req, res) {
+  const { text, stamp } = buildMarkdown();
+  const filename = `工作台备份-${stamp}.md`;
+  res.writeHead(200, {
+    'Content-Type': 'text/markdown; charset=utf-8',
+    // 告诉浏览器这是下载，且文件名用 UTF-8 方式传，避免中文乱码
+    'Content-Disposition': `attachment; filename="workbench-${stamp}.md"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'Content-Length': Buffer.byteLength(text),
+  });
+  res.end(text);
+}
+
 // ---------- 接口 ----------
 async function api(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean); // ['api','notes',id?]
+
+  // 导出全部笔记为 Markdown 文件
+  if (req.method === 'GET' && url.pathname === '/api/export') {
+    return handleExport(req, res);
+  }
 
   // 笔记列表 / 搜索
   if (req.method === 'GET' && url.pathname === '/api/notes') {
