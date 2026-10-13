@@ -1596,8 +1596,9 @@ const bmDelBtn = $('bookmark-delete'), bmCancelBtn = $('bookmark-cancel');
 const bmFetchStateEl = $('bookmark-fetch-state'), bmRefetchBtn = $('bookmark-refetch');
 const bmContentEl = $('bookmark-content'), bmSummaryEl = $('bookmark-summary'), bmTextEl = $('bookmark-text');
 const bmToggleBtn = $('bookmark-toggle-content');
-let bmFetching = false;          // 正在抓，别重复触发
-let bmShowFullText = false;      // 正文是折叠还是展开
+let bmFetchingId = null;     // 正在抓的是哪一条（按 id 记，不能用全局开关 ——
+                             //  否则在 A 抓取期间切到 B，B 会被显示成「正在抓」）
+let bmShowFullText = false;  // 正文是折叠还是展开
 
 // 这个标题是「我们按网址自动拼的」还是「用户自己打的」。
 // 只有自动的才允许被网页抓回来的真标题替换掉（后端也做同样的判断，两边都挡一道）。
@@ -1689,11 +1690,14 @@ function renderBookmarkContent() {
     return;
   }
 
-  bmRefetchBtn.classList.remove('hidden');
-  bmRefetchBtn.textContent = bmFetching ? '抓取中…' : '重新抓取';
-  bmRefetchBtn.disabled = bmFetching;      // 抓的过程中别让人反复点
+  // 只有「正在抓的这一条」才算抓取中；切到别的收藏时该显示它自己的状态
+  const mine = bmFetchingId === b.id;
 
-  if (bmFetching) {
+  bmRefetchBtn.classList.remove('hidden');
+  bmRefetchBtn.textContent = mine ? '抓取中…' : '重新抓取';
+  bmRefetchBtn.disabled = mine;          // 抓的过程中别让人反复点
+
+  if (mine) {
     cls.push('loading');
     text = '正在打开这个网页…';
   } else if (b.fetch_error) {
@@ -1719,8 +1723,8 @@ function renderBookmarkContent() {
 
 // 真的去抓一次。手动点「重新抓取」和保存后自动抓，都走这一个函数。
 async function runFetch(id, manual) {
-  if (bmFetching) return;
-  bmFetching = true;
+  if (bmFetchingId !== null) return;      // 已经有一条在抓了
+  bmFetchingId = id;
   renderBookmarkContent();
   try {
     const b = await api(`/api/bookmarks/${id}/fetch`, { method: 'POST' });
@@ -1736,7 +1740,7 @@ async function runFetch(id, manual) {
   } catch (e) {
     showBanner(`抓取没成功：${e.message}`);
   } finally {
-    bmFetching = false;
+    bmFetchingId = null;
     await loadBookmarks();
     renderBookmarkContent();
   }
@@ -1817,7 +1821,7 @@ function openNewBookmark() {
 
 function closeBookmarkEditor() {
   currentBookmarkId = null;
-  bmFetching = false;
+  bmFetchingId = null;
   $('bookmark-edit').classList.add('hidden');
   $('bookmark-empty').classList.remove('hidden');
   renderBookmarks();
