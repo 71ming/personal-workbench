@@ -1738,16 +1738,19 @@ function renderBookmarks() {
     bookmarkListEl.innerHTML = `<div class="empty">${EMPTY_ICON}<p>${hint}</p></div>`;
     return;
   }
-  bookmarkListEl.innerHTML = bookmarks.map((b) => `
+  bookmarkListEl.innerHTML = bookmarks.map((b) => {
+    const sum = bmSummary(b, '');
+    return `
     <div class="item bm-item ${b.id === currentBookmarkId ? 'active' : ''}" data-id="${b.id}">
       <div class="item-head">
         <span class="t">${esc(listTitle(b.title, b.url))}</span>
         <span class="d">${fmtTime(b.updated_at)}</span>
       </div>
       <div class="bm-host-line">${esc(b.url)}</div>
-      ${b.summary ? `<div class="bm-host-line bm-sum-line">${esc(b.summary.slice(0, 70))}${b.summary.length > 70 ? '…' : ''}</div>` : ''}
+      ${sum ? `<div class="bm-host-line bm-sum-line">${sum}</div>` : ''}
       ${bmFailLine(b)}
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // 抓失败的收藏，在列表里给个红色小标记。
@@ -1758,6 +1761,31 @@ function renderBookmarks() {
 function bmFailLine(b) {
   if (!b.fetch_error) return '';
   return `<div class="bm-fetch-line" title="${esc(b.fetch_error)}">没抓到内容</div>`;
+}
+
+// 「这两段话是不是同一句」。
+// 归一化：去掉所有空白、转小写、去掉末尾的句号问号之类。
+//
+// 为什么要判：不少网页的 og:description 就是 <title> 的原样重复
+// （w3.org 的规范页就是个典型例子，标题和摘要都是「HTML Standard」）。
+// 不挡掉的话列表上同一个词连着出现两遍 —— 白占一行，看着还像渲染出错了。
+// 判成「一样」之后列表里就只剩标题那一句，清爽。
+function sameText(a, b) {
+  const norm = (x) => String(x || '').toLowerCase().replace(/\s+/g, '')
+                            .replace(/[。.!！?？,，、;；:：~～…]+$/, '');
+  const na = norm(a), nb = norm(b);
+  return !!na && na === nb;
+}
+
+// 该显示的摘要：已去掉空值和「跟标题重复的」，也截断好了。
+// 传 keyword 就走高亮（搜索结果面板用），不传就只转义（收藏列表用）。
+// 列表和搜索面板原来是各写各的，截断长度还一个 70 一个 80，这里统一成 80。
+function bmSummary(b, keyword, maxLen = 80) {
+  const s = String(b.summary || '').trim();
+  if (!s) return '';
+  if (sameText(s, b.title)) return '';
+  const cut = s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+  return keyword ? mark(cut, keyword) : esc(cut);
 }
 
 // ---------- 抓取状态和内容的显示 ----------
@@ -1798,7 +1826,9 @@ function renderBookmarkContent() {
 
   const has = !!(b.summary || b.content);
   bmContentEl.classList.toggle('hidden', !has);
-  bmSummaryEl.textContent = b.summary || '';
+  // 摘要和标题是同一句话时也别显示两遍。给空字符串就行，
+  // .bm-summary:empty 这条 CSS 已经会把它整个藏掉，不用再动 hidden。
+  bmSummaryEl.textContent = sameText(b.summary, b.title) ? '' : (b.summary || '');
   bmTextEl.textContent = b.content || '';
   bmToggleBtn.classList.toggle('hidden', !has || !(b.content && b.content !== b.summary));
   bmToggleBtn.textContent = bmShowFullText ? '收起正文' : '查看正文';
@@ -2129,16 +2159,19 @@ function renderSearchResults(keyword, data) {
 
   if (rMarks.length) {
     html += `<div class="result-head"><b>收藏</b></div>`;
-    html += rMarks.map((b) => `
+    html += rMarks.map((b) => {
+      const sum = bmSummary(b, keyword);
+      return `
       <div class="item result-item bm-item" data-kind="bookmark" data-id="${b.id}">
         <div class="item-head">
           <span class="t">${mark(listTitle(b.title, b.url), keyword)}</span>
           <span class="kind-tag bm">收藏</span>
         </div>
         <div class="bm-host-line">${mark(b.url, keyword)}</div>
-        ${b.summary ? `<div class="bm-host-line bm-sum-line">${mark(b.summary.slice(0, 80), keyword)}${b.summary.length > 80 ? '…' : ''}</div>` : ''}
+        ${sum ? `<div class="bm-host-line bm-sum-line">${sum}</div>` : ''}
         ${bmFailLine(b)}
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
   searchResultsEl.innerHTML = html;
 }
