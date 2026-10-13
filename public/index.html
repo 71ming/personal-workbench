@@ -250,23 +250,31 @@
   #editor-empty svg { width: 44px; height: 44px; opacity: .4; }
   #editor-empty p { margin: 0; font-size: 13.5px; }
 
-  /* 编辑区。正文限制最大宽度，行太长不好读。 */
-  #edit-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+  /* 编辑区。正文限制最大宽度，行太长不好读。
+     .doc 用 flex:1 吃掉剩余高度，正文框再 flex:1 填满 .doc，
+     这样写笔记时正文区永远是满屏的，写得长时在框内自己滚动。 */
+  #edit-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   /* 通用显隐工具类。必须 !important：#edit-pane、.btn 这类选择器
      特异性比 .hidden 高，不加就盖不住它们的 display。 */
   .hidden { display: none !important; }
-  .doc { width: 100%; max-width: 760px; margin: 0 auto; padding: 40px 48px 120px; }
+  /* 滚动放在 .doc 上，让标题栏固定、正文框内部滚动 */
+  .doc {
+    width: 100%; max-width: 760px; margin: 0 auto;
+    padding: 32px 48px 60px;
+    flex: 1; min-height: 0;
+    overflow-y: auto;
+  }
 
   #title {
     width: 100%; border: none; outline: none; background: transparent;
-    padding: 0 0 12px; margin-bottom: 12px;
+    padding: 0 0 12px; margin-bottom: 12px; flex-shrink: 0;
     font-size: 27px; font-weight: 700; line-height: 1.35;
     font-family: inherit; color: var(--text);
     border-bottom: 1px solid var(--border-soft);
   }
   #title::placeholder { color: #c4c9cf; }
   #body {
-    flex: 1; width: 100%; min-height: 420px;
+    flex: 1; width: 100%; min-height: 200px;   /* 200px 只是兜底，正常情况是 flex:1 撑满 */
     border: none; outline: none; resize: none; background: transparent;
     font-size: 15.5px; line-height: 1.85; font-family: inherit; color: var(--text);
   }
@@ -285,12 +293,15 @@
   .mode-switch button:hover { color: var(--text); }
   .mode-switch button.on { background: var(--surface); color: var(--accent); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 
-  .panes { display: flex; gap: 36px; }
-  .pane { flex: 1; min-width: 0; }
+  /* 布局链要一环扣一环全是 flex 容器，否则 #body 的 flex:1 根本不生效，
+     正文框会被压成两三条高的一窄条。逐层：
+       #edit-pane (列) → .doc (列, 撑满) → .panes (行, 撑满) → .pane (列) → #body (撑满) */
+  .doc { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .panes { display: flex; gap: 36px; flex: 1; min-height: 0; }
+  .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   #edit-pane.mode-edit .pane-view { display: none; }
   #edit-pane.mode-preview .pane-edit { display: none; }
-  #edit-pane.mode-edit #body { min-height: 100%; }
-  #edit-pane.mode-preview .markdown { min-height: 420px; }
+  #edit-pane.mode-preview .markdown { min-height: 100%; }
   /* 分栏要放得下两列，把正文区放宽 */
   #edit-pane.mode-split .doc { max-width: 1120px; }
   #edit-pane.mode-split .pane-view {
