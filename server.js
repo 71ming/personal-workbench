@@ -1011,8 +1011,14 @@ function parseCitations(answer, notes) {
     const note = notes[idx - 1];
     if (!note) { bad++; return m; }
     used.add(idx);
-    // 换成内部标记，前端再渲染成可点回原笔记的按钮
-    return `CITE${idx}`;
+    // 换成内部标记，前端再渲染成可点回原笔记的按钮。
+    //
+    // 这里必须用 \u0002 控制符包住编号，**不能**写成 CITE1 这种看得见的字样：
+    // 模型完全可能自己吐出 "CITE1"（笔记正文里正好写着内部约定时尤其容易）。
+    // 前端若是靠 /CITE\d+/ 认标记，这种原文会被当成真引用；
+    // 而编号对不上引用表，那个词就被渲染成空 —— 回答里凭空少一块，用户还以为模型漏答了。
+    // \u0002 是控制字符，模型生成不出来，永远撞不了车。
+    return `\u0002${idx}\u0002`;
   });
   return { text, cited: [...used], bad };
 }
