@@ -134,7 +134,9 @@ const bmq = {
   clearFetch: db.prepare("UPDATE bookmarks SET content='', summary='', fetched_at=NULL, fetch_error=NULL WHERE id=? AND deleted_at IS NULL"),
   softDel: db.prepare("UPDATE bookmarks SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL"),
   restore: db.prepare('UPDATE bookmarks SET deleted_at=NULL WHERE id=?'),
-  allForExport: db.prepare('SELECT url,title,summary,created_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY created_at ASC'),
+  // 导出要多带两个字段：抓取状态决定这份备份能不能告诉你「哪些网页其实没存下来内容」。
+  // 只在失败时输出提示行，所以绝大多数条目（抓取成功的）不会因此变啰嗦。
+  allForExport: db.prepare('SELECT url,title,summary,fetched_at,fetch_error,created_at FROM bookmarks WHERE deleted_at IS NULL ORDER BY created_at ASC'),
 };
 
 // 软删除：不真删，只打一个删除时间戳，撤销就是把时间戳清空。
@@ -437,13 +439,16 @@ function buildMarkdown() {
   const today = new Date();
   const stamp = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
+  // 开头就把「有几条收藏其实没存下内容」说出来 —— 不用翻到收藏那节去找。
+  const bmFailCount = marks.filter((b) => b.fetch_error).length;
   const lines = [
     `# 个人工作台 · 导出备份`,
     ``,
     `> 导出时间：${today.toLocaleString('zh-CN')}`,
     `> 共 ${notes.length} 条笔记` +
        `${tasks.length ? `，${tasks.length} 条任务（已完成 ${doneCount}）` : ''}` +
-       `${marks.length ? `，${marks.length} 条收藏` : ''}`,
+       `${marks.length ? `，${marks.length} 条收藏` : ''}` +
+       `${bmFailCount ? `（其中 ${bmFailCount} 条没抓到内容，原因见收藏那节）` : ''}`,
     ``,
     `---`,
     ``,
@@ -481,6 +486,14 @@ function buildMarkdown() {
       const title = String(b.title || '').trim() || titleFromUrl(b.url) || b.url;
       lines.push(`- [${title.replace(/\s*\n\s*/g, ' ')}](${b.url})`);
       if (b.summary) lines.push(`  > ${b.summary.replace(/\s*\n\s*/g, ' ')}`);
+      // 抓取状态也写进备份。**抓成功的不写** —— 那是默认状态，每条都写一遍全是噪音。
+      // 但「没抓到」和「还没抓」必须写：这份文件是你唯一的备份，
+      // 要是看不出来，过一个月回看会以为那几个网页本来就没内容，白重抓一遍。
+      if (b.fetch_error) {
+        lines.push(`  > 没抓到内容：${b.fetch_error.replace(/\s*\n\s*/g, ' ')}`);
+      } else if (!b.fetched_at) {
+        lines.push(`  > 还没抓取内容`);
+      }
     }
     lines.push(``, `---`, ``);
   }
