@@ -41,98 +41,192 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // ---- 1. 前端目录 ----
-            let public_dir =
-                find_public_dir(app.handle()).map_err(|e| format!("找不到界面文件：{}", e))?;
-
-            // ---- 2. 数据目录 ----
+            // 这里面任何一步失败都要走 report_failure()，**不能只用 `?` 往上抛**。
             //
-            // 这里跟 server.js 有个**必须不一样**的地方：
+            // 原因：release 版没有控制台（main.rs 里设了 windows_subsystem），
+            // 所以 `?` 抛出的错误信息唯一的去处就是崩溃对话框，
+            // 而实际上用户看到的只是「窗口闪一下就没了」——
+            // 既不知道发生了什么，也不知道去哪儿看日志。
             //
-            // server.js 用 `path.join(__dirname, 'data')` —— 也就是「程序旁边的 data 目录」。
-            // 那在「双击 bat 解压即用」的形态下没问题。
-            // 但桌面应用会被装进 C:\Program Files\ 之类**没有写权限**的目录，
-            // 往那儿建 data/ 会直接失败。所以必须问系统要一个「该放这儿」的位置：
-            //
-            //   Windows: C:\Users\<你>\AppData\Roaming\com.workbench.desktop\
-            //   macOS:   ~/Library/Application Support/com.workbench.desktop/
-            //   Linux:   ~/.local/share/com.workbench.desktop/
-            //
-            // 用户自己找得到、卸载软件也不会被顺手删掉 —— 这正是我们要的。
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("拿不到数据目录：{}", e))?;
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|e| format!("建数据目录失败：{}", e))?;
-            let db_path = data_dir.join("workbench.db");
-
-            // ---- 3. 起 HTTP 服务 ----
-            let port = http_server::serve(db_path, public_dir)?;
-
-            // ---- 4. 窗口指向真实地址 ----
-            //
-            // tauri.conf.json 里没配 url（配了会被当成默认地址先加载一次，
-            // 然后我们再跳走，白白多一次失败请求）。
-            // 这里在运行时直接把窗口导航到实际端口。
-            let url = format!("http://127.0.0.1:{}", port);
-            if let Some(window) = app.get_webview_window("main") {
-                let parsed = url.parse().map_err(|_| "地址格式不对".to_string())?;
-                window
-                    .navigate(parsed)
-                    .map_err(|e| format!("打开窗口失败：{}", e))?;
+            // 这是实测踩到的：装完双击，窗口开一下就关，什么提示都没有。
+            // 而「没有错误提示」本身就是个 bug：出错了却不让用户知道怎么修，
+            // 比出错更糟。
+            match bootstrap(app) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    report_failure(app, &e);
+                    // **在这里就退出，不把错误返回给 Tauri。**
+                    //
+                    // 实测踩过：本来写的是「报告完再 `Err(e.into())` 返回去，
+                    // 然后在 run() 外面优雅退出」。结果退出码还是 -1073740791
+                    // （panic）—— 说明 Tauri 收到 setup 的 Err 之后**内部自己又 panic 了**，
+                    // 外层那个 `if let Err(e) = result` 压根没机会执行。
+                    //
+                    // 后果很具体：Windows 弹一个「已停止工作」的红框，
+                    // 而那是个**模态对话框** —— 它会盖住 report_failure 刚打开的错误说明。
+                    // 用户于是先看到一个红框，合理地推断「这软件崩了」，
+                    // 根本不会去看旁边那篇清清楚楚的排查步骤。
+                    //
+                    // 所以顺序反过来：**先把错误说明摆到用户眼前，再退出**，
+                    // 一秒都不要让那个崩溃框有机会抢镜。
+                    std::process::exit(1);
+                }
             }
-
-            Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("工作台启动失败");
+        .expect("Tauri 运行期异常（不是启动失败——启动失败已在上面处理并退出）");
 }
 
-/// 找到 public/index.html 在哪。
-///
-/// —— 这里有个「开发便利」和「发布正确性」的冲突，踩过才知道要分 ——
-///
-/// 第一个版本是无条件按「先 resource 再源码树」找的。实测拷到临时目录单独跑，
-/// 服务起来了、接口也通，看起来没问题 —— 因为**这台机器上源码树还在**。
-/// 但 `CARGO_MANIFEST_DIR` 是**编译期常量**，路径已经写死在 exe 里了：
-/// 拷到别人电脑上，那条路径根本不存在，界面就是白屏，
-/// 而且因为程序不崩、日志也看不到，很难判断是哪里错了。
-///
-/// 所以改成按构建类型区分：
-///
-///   debug 构建 → 认源码树。
-///     改 index.html 刷新窗口就生效，不用重新编译 Rust。开发体验值这个。
-///
-///   release 构建 → **只认资源目录**，绝不回退到构建机路径。
-///     因为那条路径在发布对象电脑上必然是失效的，
-///     回退只会把「明确找不到」变成「莫名其妙白屏」。
-///     真找不到就报一句人话，让用户知道是安装不完整。
-///
-/// 打包后 Tauri 会把 frontendDist 的内容放进安装包的 resources 目录，
-/// `resource_dir()` 指的就是那儿 —— 这是发布环境下的正确来源。
-fn find_public_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(res) = app.path().resource_dir() {
-        let candidate = res.join("public");
-        if candidate.join("index.html").exists() {
-            return Ok(candidate);
-        }
+/// 真正的启动流程。抽出来是为了让「每一步出错都能被接住并报告」。
+fn bootstrap(app: &tauri::App) -> Result<(), String> {
+    // ---- 1. 前端目录 ----
+    // 找不到不算错：会用编译进 exe 的那一份（见 http_server.rs 的 EMBEDDED_INDEX）。
+    let public_dir = find_public_dir(app.handle())?;
+
+    // ---- 2. 数据目录 ----
+    //
+    // 这里跟 server.js 有个**必须不一样**的地方：
+    //
+    // server.js 用 `path.join(__dirname, 'data')` —— 也就是「程序旁边的 data 目录」。
+    // 那在「双击 bat 解压即用」的形态下没问题。
+    // 但桌面应用会被装进 C:\Program Files\ 之类**没有写权限**的目录，
+    // 往那儿建 data/ 会直接失败。所以必须问系统要一个「该放这儿」的位置：
+    //
+    //   Windows: C:\Users\<你>\AppData\Roaming\com.workbench.desktop\
+    //   macOS:   ~/Library/Application Support/com.workbench.desktop/
+    //   Linux:   ~/.local/share/com.workbench.desktop/
+    //
+    // 用户自己找得到、卸载软件也不会被顺手删掉 —— 这正是我们要的。
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("拿不到数据目录：{}", e))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("建数据目录失败：{}", e))?;
+    let db_path = data_dir.join("workbench.db");
+
+    // ---- 3. 起 HTTP 服务 ----
+    let port = http_server::serve(db_path, public_dir)?;
+
+    // ---- 4. 窗口指向真实地址 ----
+    //
+    // tauri.conf.json 里没配 url（配了会被当成默认地址先加载一次，
+    // 然后我们再跳走，白白多一次失败请求）。
+    // 这里在运行时直接把窗口导航到实际端口。
+    let url = format!("http://127.0.0.1:{}", port);
+    if let Some(window) = app.get_webview_window("main") {
+        let parsed = url.parse().map_err(|_| "地址格式不对".to_string())?;
+        window
+            .navigate(parsed)
+            .map_err(|e| format!("打开窗口失败：{}", e))?;
     }
 
-    // 只有开发构建才回退到源码树。
-    if cfg!(debug_assertions) {
+    Ok(())
+}
+
+/// 启动失败时：**写日志 + 当场打开日志文件**。
+///
+/// 为什么不用弹窗：`MessageBox` 得引 winapi 或 tauri-plugin-dialog 才做得到，
+/// 而这个项目一路的取舍都是「不加不必要的依赖」。
+/// 用系统自带的记事本打开日志，零依赖、信息还更全（带时间戳和上下文）。
+///
+/// 挑在**出错当场**打开，而不是「下次启动再显示」——
+/// 用户正等着双击看结果，这时候把原因摆到眼前才有意义。
+fn report_failure(app: &tauri::App, message: &str) {
+    // 先拿到数据目录才能写日志。拿不到就退到临时目录 —— 总比什么都不留强。
+    let log_path = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("启动错误.log"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join("workbench-启动错误.log")
+        });
+
+    let body = format!(
+        "个人工作台启动失败\n{}\n\n\
+         原因：\n{}\n\n\
+         ---\n\
+         这一版只实现了「笔记」，任务/收藏是空的，正常使用不受影响。\n\
+         如果反复出现，请把本文件发给开发者。\n",
+        chrono_now(),
+        message
+    );
+
+    // 写日志时**带 UTF-8 BOM**。
+    // 不带的话记事本会按系统 ANSI（中文 Windows 是 GBK）去读，
+    // 结果满屏「涓汉宸ヤ綔鍙」这种乱码 —— 错误信息等于白写。
+    // 这跟方案.md 里记的「启动.bat 必须是 UTF-8 BOM」是同一个坑的另一个方向：
+    // 那边是 cmd 不看 chchcp，这边是记事本不看编码标记。
+    let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+    bytes.extend_from_slice(body.as_bytes());
+    let _ = std::fs::write(&log_path, &bytes);
+
+    // 打开日志。用 `start` 而不是直接调 notepad.exe：
+    // notepad.exe 在较新 Windows 上是个应用别名，直接调可能找不到，
+    // `cmd /c start` 走 shell 的文件关联，稳定得多。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", log_path.to_str().unwrap_or("")])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&log_path).spawn();
+    }
+}
+
+/// 一个不依赖 chrono 的时间戳。
+/// 引入 chrono 就为了打一行日志不值当 —— 这个项目连 SQLite 都是 bundled 编进去的。
+fn chrono_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("时间戳(Unix): {}", secs)
+}
+
+/// 找到 public/index.html 在哪。**找不到不算致命。**
+///
+/// 返回 `Ok(None)` 的意思是「磁盘上没有，用编译进 exe 的那一份」。
+/// 真正的修法在 http_server.rs 的 `EMBEDDED_INDEX` —— 那才是「双击闪退」的解药。
+///
+/// 为什么还要留这个函数、还要去磁盘上找：
+/// 开发时磁盘上有 public/，改完 index.html 刷新窗口就生效，不用重编译 Rust。
+/// 这点很值这几行代码。
+///
+/// ⚠️ 这里记一个踩过的坑：第一版写了个 `WORKBENCH_STRICT_RESOURCES` 诊断开关，
+/// 本意是「设了就别回退到源码树，用来模拟发布环境」，
+/// 结果判断写反了 —— 变量叫 strict，条件却是「允许回退」。
+/// 于是设了 =1 反而回退，诊断显示「一切正常」，我差点据此写下
+/// 「资源查找没问题」的错误结论。
+///
+/// **判断反了的标志：一开诊断开关，故障就消失了。**
+/// 以后写这类开关，先确认「开关关掉时行为和原来一致」。
+fn find_public_dir(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    let allow_source_fallback = cfg!(debug_assertions)
+        && std::env::var("WORKBENCH_STRICT_RESOURCES").as_deref() != Ok("1");
+    if allow_source_fallback {
         let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("public");
         if dev.join("index.html").exists() {
-            return Ok(dev);
+            return Ok(Some(dev));
         }
     }
 
-    Err(
-        "找不到界面文件 public/index.html。\n\
-         重新安装一次应该就好 —— 这通常说明安装包不完整，或者被杀毒软件删掉了一部分。"
-            .to_string(),
-    )
+    // 装好的版本里，资源在 exe 旁边的 resources 目录下。
+    if let Ok(res) = app.path().resource_dir() {
+        let candidate = res.join("public");
+        if candidate.join("index.html").exists() {
+            return Ok(Some(candidate));
+        }
+    }
+
+    // 磁盘上都没有 —— 不是错误，交给内嵌的那份。
+    Ok(None)
 }

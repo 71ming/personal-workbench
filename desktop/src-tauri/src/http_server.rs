@@ -52,7 +52,6 @@ use crate::db;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -62,6 +61,29 @@ const DEFAULT_PORT: u16 = 8787;
 
 /// 请求体上限：5MB。跟 server.js 的 5e6 保持一致。
 const MAX_BODY: u64 = 5 * 1024 * 1024;
+
+// ============================================================================
+// 界面文件内嵌进 exe
+// ============================================================================
+//
+// 这行是修「双击闪退」的正解。
+//
+// 出事的链条：
+//   1. tauri.conf.json 里 frontendDist 指向 ../../public
+//   2. 但**编译时 Tauri 不会把 public/ 复制到 target/ 目录里**——
+//      frontendDist 只对 `cargo tauri build` 打的**安装包**有意义
+//   3. 于是直接跑 target/release/workbench.exe 时，
+//      resource_dir() 指向 target/release，那儿没有 public/index.html
+//   4. release 又没有控制台（见 lib.rs 的 report_failure）→ 静默退出 → 闪一下就没了
+//
+// 「优先读磁盘、读不到用内嵌」这个组合，两个需求都满足：
+//   开发时：磁盘上有 public/，改完 index.html 刷新窗口就生效，不用重编译
+//   发布时：磁盘上没有（或被杀毒软件删了），用编译进 exe 的这一份，一定能开
+//
+// 代价：改 index.html 会让 cargo 重编本 crate（debug 约 8 秒，release 约 1 分钟）。
+// 前端是单文件、自包含、无外部资源，所以内嵌一份就够。
+const EMBEDDED_INDEX: &[u8] = include_bytes!("../../../public/index.html");
+
 
 /// 实际用哪个端口。
 ///
@@ -79,10 +101,9 @@ fn resolve_port() -> u16 {
 
 // 起服务，返回实际端口。
 //
-// 数据库路径和前端目录由调用方传进来 —— 这样这个模块不关心
-// 「数据存在哪」「界面文件在哪」，只管「收到请求怎么回」，
-// 好测试也好复用。
-pub fn serve(db_path: PathBuf, public_dir: PathBuf) -> Result<u16, String> {
+// 数据库路径由调用方传进来；前端目录可以是 None
+//（意思是「磁盘上没有，用内嵌的那一份」，见 EMBEDDED_INDEX）。
+pub fn serve(db_path: PathBuf, public_dir: Option<PathBuf>) -> Result<u16, String> {
     let port = resolve_port();
 
     // 绑 127.0.0.1 而不是 0.0.0.0。
@@ -94,31 +115,34 @@ pub fn serve(db_path: PathBuf, public_dir: PathBuf) -> Result<u16, String> {
     // 写死 IPv4 最省事。
     let addr = format!("127.0.0.1:{}", port);
 
-    // ---- 先用标准库试探端口，再交给 tiny_http ----
+    // ---- 先用「连接测试」确认端口没人用，再交给 tiny_http ----
     //
-    // 为什么多这一步：Windows 上 socket 默认带 SO_REUSEADDR，
-    // 于是 **两个进程可以同时 bind 同一个端口**，bind 成功、都不报错，
-    // 但谁来处理请求变得不确定（谁先 accept 谁接，行为随启动顺序变）。
+    // 踩坑记录，这条是被实测推翻过一次才写对的：
     //
-    // 实测就撞上过一次：server.js（node）和 workbench 同时占着 8787，
-    // 两边都以为自己是主角。这种问题不主动查根本发现不了，
-    // 而且现象是「有时候笔记列表是空的，有时候是满的」——极难定位。
+    // 最初用的是「`TcpListener::bind` 成功就说明端口空闲」。
+    // 听着很合理，但实测发现**它是错的**：当 8787 已经被 node（server.js）占着时，
+    // `TcpListener::bind("127.0.0.1:8787")` **依然返回成功**。
+    // 原因是 Windows 的 socket 默认可复用地址，两个进程可以同时 bind 同一端口，
+    // 谁来处理请求变得不确定（谁先 accept 谁接）。
+    // 换句话说：「bind 成功」根本不能证明「端口是空的」。
     //
-    // 所以这里先 bind 一个 TcpListener 试一下：失败就说明端口真的被占着，
-    // 立刻给一句人话提示，而不是等窗口白屏。
-    // 探完就 drop 掉（把端口还回去），tiny_http 再重新 bind。
-    // 中间有一瞬间的空档，理论上存在被别人抢走的竞态 ——
-    // 但这个进程本来就在启动阶段，被抢的概率小到可以忽略。
-    match TcpListener::bind(&addr) {
-        Ok(probe) => drop(probe),
-        Err(e) => {
-            return Err(format!(
-                "端口 {} 被别的程序占着（{}）。\n\
-                 这通常是「server.js 那个版本还开着」—— 关掉它再启动桌面版。\n\
-                 要是想两个一起跑，设个环境变量换端口：set WORKBENCH_PORT=8788",
-                port, e
-            ));
-        }
+    // 换成**连一下试试**：能不能连上，才是真的有人在用那个端口。
+    // 这个判断不受 SO_REUSEADDR 影响 —— 端口上有活着的服务就一定连得上。
+    if std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port)
+            .parse()
+            .map_err(|_| "端口格式不对".to_string())?,
+        std::time::Duration::from_millis(400),
+    )
+    .is_ok()
+    {
+        return Err(format!(
+            "端口 {} 上已经有东西在跑。\n\n\
+             最常见的原因：**你电脑上那个「启动.bat」还开着**（那是 Node 版，跟桌面版抢同一个端口）。\n\n\
+             怎么办：把那个黑色命令行窗口关掉，再双击一次。\n\
+             如果你确实想两个一起跑，设个环境变量换端口：set WORKBENCH_PORT=8788",
+            port
+        ));
     }
 
     let server = Server::http(&addr).map_err(|e| format!("起服务失败：{}", e))?;
@@ -145,7 +169,7 @@ pub fn serve(db_path: PathBuf, public_dir: PathBuf) -> Result<u16, String> {
     Ok(bound_port)
 }
 
-fn handle(mut request: Request, db_path: &Path, public_dir: &Path) {
+fn handle(mut request: Request, db_path: &Path, public_dir: &Option<PathBuf>) {
     let url = request.url().to_string();
     let method = request.method().clone();
     let (path, query) = split_url(&url);
@@ -160,7 +184,7 @@ fn handle(mut request: Request, db_path: &Path, public_dir: &Path) {
     }
 
     // 不带 /api/ 的一律当静态文件。
-    let _ = request.respond(serve_static(&path, public_dir));
+    let _ = request.respond(serve_static(&path, public_dir.as_deref()));
 }
 
 // ---------- 路由 ----------
@@ -427,7 +451,8 @@ fn mime_of(ext: &str) -> &'static str {
     }
 }
 
-fn serve_static(path: &str, public_dir: &Path) -> Response<Box<dyn Read + Send>> {
+// public_dir 是 None 时，index.html 直接用内嵌的那份。
+fn serve_static(path: &str, public_dir: Option<&Path>) -> Response<Box<dyn Read + Send>> {
     let rel = if path == "/" { "index.html" } else { path.trim_start_matches('/') };
 
     // 目录穿越防护：请求 /../../Windows/System32 时，
@@ -445,21 +470,32 @@ fn serve_static(path: &str, public_dir: &Path) -> Response<Box<dyn Read + Send>>
             .boxed();
     }
 
-    let file = public_dir.join(requested);
-    match std::fs::read(&file) {
-        Ok(bytes) => {
-            let ext = file
+    // 磁盘上能读到就用磁盘的（开发时改前端立即生效）。
+    if let Some(dir) = public_dir {
+        if let Ok(bytes) = std::fs::read(dir.join(requested)) {
+            let ext = requested
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            Response::from_data(bytes)
+            return Response::from_data(bytes)
                 .with_status_code(200)
                 .with_header(content_type(mime_of(ext)))
-                .boxed()
+                .boxed();
         }
-        Err(_) => Response::from_string("not found")
+    }
+
+    // 磁盘上没有：只对 index.html 退回内嵌的那份。
+    // 别的路径该 404 就 404 —— 不然「资源目录配错了」这种问题会被悄悄盖住，
+    // 变成「某个图标加载不出来」这种极难定位的现象。
+    if requested == Path::new("index.html") {
+        Response::from_data(EMBEDDED_INDEX.to_vec())
+            .with_status_code(200)
+            .with_header(content_type("text/html; charset=utf-8"))
+            .boxed()
+    } else {
+        Response::from_string("not found")
             .with_status_code(404)
             .with_header(content_type("text/plain; charset=utf-8"))
-            .boxed(),
+            .boxed()
     }
 }
