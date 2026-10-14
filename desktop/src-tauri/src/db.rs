@@ -930,3 +930,54 @@ pub fn restore_bookmark(conn: &Connection, id: i64) -> Result<Option<Value>, Str
         .map_err(|e| format!("撤销失败：{}", e))?;
     get_bookmark(conn, id)
 }
+
+/// 抓取成功后写回。
+///
+/// 标题只在「原来就是自动生成的」时才替换 —— 用户自己起的名字一个字都不动。
+/// 判断依据见 `is_auto_title()`：标题为空，或者标题长得就像我们按链接拼的。
+pub fn apply_fetch(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    content: &str,
+    summary: &str,
+) -> Result<Option<Value>, String> {
+    let n = conn
+        .execute(
+            "UPDATE bookmarks SET title=?1, content=?2, summary=?3,
+                    fetched_at=datetime('now','localtime'), fetch_error=NULL,
+                    updated_at=datetime('now','localtime')
+             WHERE id=?4 AND deleted_at IS NULL",
+            rusqlite::params![title, content, summary, id],
+        )
+        .map_err(|e| format!("写回抓取内容失败：{}", e))?;
+    if n == 0 {
+        return Ok(None);
+    }
+    get_bookmark(conn, id)
+}
+
+/// 只写失败原因，**不动标题和正文**。
+///
+/// 抓不到不算错误操作：链接照样存着，只是没内容。
+/// 记下原因是为了让用户知道「为什么没抓到」并能点重试。
+pub fn mark_fetch_fail(conn: &Connection, id: i64, reason: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE bookmarks SET fetch_error=?1, updated_at=datetime('now','localtime')
+         WHERE id=?2 AND deleted_at IS NULL",
+        rusqlite::params![reason, id],
+    )
+    .map_err(|e| format!("记录抓取失败原因出错：{}", e))?;
+    Ok(())
+}
+
+/// 丢掉已抓到的内容（「手动重来」用）。链接不变，只是内容清空。
+pub fn clear_fetch(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
+    conn.execute(
+        "UPDATE bookmarks SET content='', summary='', fetched_at=NULL, fetch_error=NULL
+         WHERE id=?1 AND deleted_at IS NULL",
+        [id],
+    )
+    .map_err(|e| format!("清除抓取内容失败：{}", e))?;
+    get_bookmark(conn, id)
+}

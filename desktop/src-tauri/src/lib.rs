@@ -19,6 +19,7 @@
 // ============================================================================
 
 pub mod db;
+pub mod fetch;
 pub mod http_server;
 
 use std::path::PathBuf;

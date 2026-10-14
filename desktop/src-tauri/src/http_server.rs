@@ -160,6 +160,23 @@ pub fn serve(db_path: PathBuf, public_dir: Option<PathBuf>) -> Result<u16, Strin
     let db_path = Arc::new(db_path);
     let public_dir = Arc::new(public_dir);
 
+    // ---------- 一个已知限制：抓网页时会阻塞其它请求 ----------
+    //
+    // `incoming_requests()` 是**串行**的：处理完一个才拿下一个。
+    // 而抓网页（POST /api/bookmarks/:id/fetch）最多要 8 秒
+    // （对方站点慢，或者就是在等超时）。
+    //
+    // 后果是：抓取期间进来的其它请求会排队等它。
+    // 实际影响很小 —— 这是单人本地应用，抓取时也就那一个请求在转圈，
+    // 顶多是用户同时在改标题，自动保存晚几秒才落库（不会丢，只是慢）。
+    //
+    // **为什么不去改成每请求一线程**：
+    // 那是阶段 0 定的结构（并发极低时最不容易写错），
+    // 为了「一个人用的时候抓网页的 8 秒里界面别卡」去改它，
+    // 是拿并发 bug 的风险换实际收益接近零的东西。
+    //
+    // 什么时候该改：真的要做「后台批量抓取」或者「多个窗口同时用」的时候。
+    // 那时正确做法是抓取丢进后台线程 + 轮询状态，不是简单地开线程。
     std::thread::spawn(move || {
         for request in server.incoming_requests() {
             handle(request, &db_path, &public_dir);
@@ -399,6 +416,52 @@ fn route(
 
                 if seg.len() == 3 && seg[2] == "restore" && *method == Method::Post {
                     return match db::restore_bookmark(&conn, id)? {
+                        Some(bm) => Ok(json_response(200, &bm)),
+                        None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                    };
+                }
+
+                // ---------- 抓内容（自动 + 手动重试都走这一个接口） ----------
+                //
+                // 刻意做成「前端来调」而不是「保存时后端顺手抓」：
+                // 后端顺手抓会让保存接口被一个 8 秒的网络请求卡住，
+                // 对方站点慢一点，你连「保存链接」都要干等。
+                if seg.len() == 3 && seg[2] == "fetch" && *method == Method::Post {
+                    let cur = match db::get_bookmark(&conn, id)? {
+                        Some(bm) => bm,
+                        None => return Ok(json_response(404, &json!({ "error": "not found" }))),
+                    };
+                    let url = cur.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let cur_title = cur.get("title").and_then(|v| v.as_str()).unwrap_or("");
+
+                    return match crate::fetch::fetch_bookmark_content(url) {
+                        Ok(picked) => {
+                            // 只在「原来的标题就是自动生成的那个」时才换成网页真标题。
+                            let auto = db::is_auto_title(cur_title, url);
+                            let new_title = if !picked.title.is_empty() && auto {
+                                picked.title.as_str()
+                            } else {
+                                cur_title
+                            };
+                            match db::apply_fetch(&conn, id, new_title, &picked.content, &picked.summary)? {
+                                Some(bm) => Ok(json_response(200, &bm)),
+                                None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                            }
+                        }
+                        Err(e) => {
+                            // 抓不到不算错误操作：链接照样存着，只是没内容。
+                            // 记下原因给用户点重试，返回的仍是 200。
+                            db::mark_fetch_fail(&conn, id, &e.message)?;
+                            let mut bm = db::get_bookmark(&conn, id)?.unwrap_or(json!({}));
+                            bm["fetch_error"] = json!(e.message);
+                            Ok(json_response(200, &bm))
+                        }
+                    };
+                }
+
+                // 丢掉已抓到的内容（换链接前的「手动重来」）
+                if seg.len() == 3 && seg[2] == "fetch" && *method == Method::Delete {
+                    return match db::clear_fetch(&conn, id)? {
                         Some(bm) => Ok(json_response(200, &bm)),
                         None => Ok(json_response(404, &json!({ "error": "not found" }))),
                     };

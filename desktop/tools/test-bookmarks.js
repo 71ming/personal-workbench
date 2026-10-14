@@ -167,9 +167,11 @@ async function req(method, path, body) {
   ok('非数字 id 返回 400 bad id', bad.status === 400 && bad.body.error === 'bad id',
     `实际 ${bad.status} ${JSON.stringify(bad.body)}`);
 
-  // 1c 才实现的抓取接口，现在应该 404 而不是崩
+  // 阶段 1c 之前，这里验的是「抓取接口还没做，返回 404」。
+  // 现在 1c 已经做了，这条改成验「接口存在」。
+  // 抓取功能本身的测试在 test-fetch.js 里，不在这儿重复。
   const fetch1c = await req('POST', `/api/bookmarks/${target.id}/fetch`);
-  ok('抓取接口还没做（404，不是 500）', fetch1c.status === 404, `实际 ${fetch1c.status}`);
+  ok('抓取接口存在（不是 404）', fetch1c.status === 200, `实际 ${fetch1c.status}`);
 
   // ---------------- 统一搜索 ----------------
   console.log('\n【统一搜索】');
