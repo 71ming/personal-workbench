@@ -528,10 +528,57 @@ fn route(
             .boxed());
     }
 
-    // AI 配置：阶段 0 完全没实现。
-    // 前端启动时会调它，取不到就静默跳过（有 .catch），所以这里给个空的合法结构。
-    if seg[0] == "ai" && seg.len() == 2 && seg[1] == "config" && *method == Method::Get {
-        return Ok(json_response(200, &json!({ "catalog": [], "config": null })));
+    // ============ AI ============
+    //
+    // 五个接口，全部在 ai.rs 里实现，规则和 server.js 那份逐条对齐。
+    //
+    // 状态码的约定跟别的接口有点不一样，这里是刻意的：
+    //   * **配置类**错误（服务商不认识、模型名太长）→ 400，用户改一下就好；
+    //   * **调用类**的一切失败（密钥错、限流、超时、对方挂了）→ 仍然是 200，
+    //     失败信息放在返回体的 ok:false 里。
+    //
+    // 为什么调用失败不用 4xx/5xx：前端 `api()` 遇到非 2xx 会抛异常，
+    // 只能弹一句「接口出错：401」，而这个应用最有用的恰恰是**具体原因**
+    // （密钥错了？限流了？模型名不对？网络断了？），每种的处理方式完全不同。
+    // 让它进正常返回体，前端才能分类给出「去设置里改密钥」这种能照做的提示。
+    if seg[0] == "ai" && seg.len() == 2 {
+        // 用 if/else 而不是 match：tiny_http 的 Method 是「常量」不是「变体」
+        // （它是 `*method == Method::Get` 这样比的），写不进 match 的模式里。
+        if seg[1] == "config" && *method == Method::Get {
+            return Ok(json_response(200, &crate::ai::get_config(db_path)));
+        }
+        // 存配置。前端只在用户真的输入了新密钥时才带 api_key 字段，
+        // 不带 = 保留原来那个（这个约定在 ai.rs 里有详细说明）。
+        if seg[1] == "config" && *method == Method::Put {
+            let payload = read_json(body)?;
+            let conn = db::open(db_path)?;
+            return match crate::ai::put_config(&conn, db_path, &payload) {
+                Ok(v) => Ok(json_response(200, &v)),
+                Err(e) => Ok(json_response(400, &json!({ "error": e }))),
+            };
+        }
+        // 列出这家当前可用的模型。永远 200（失败也在体里说清楚）。
+        if seg[1] == "models" && *method == Method::Post {
+            let payload = read_json(body)?;
+            return Ok(json_response(200, &crate::ai::detect_models(db_path, &payload)));
+        }
+        // 连通性测试：用页面上现在填着的服务商和模型，不要求先保存。
+        if seg[1] == "test" && *method == Method::Post {
+            let payload = read_json(body)?;
+            return Ok(json_response(200, &crate::ai::test_connection(db_path, &payload)));
+        }
+        // 真正把勾选的笔记交给模型。
+        if seg[1] == "ask" && *method == Method::Post {
+            let payload = read_json(body)?;
+            let conn = db::open(db_path)?;
+            return match crate::ai::ask(&conn, db_path, &payload) {
+                Ok(v) => Ok(json_response(200, &v)),
+                // 参数不对（问题空、一条都没勾）才是 400；
+                // 「调用失败」在 ai.rs 里已经变成 ok:false 的 200 了。
+                Err(e) => Ok(json_response(400, &e)),
+            };
+        }
+        return Ok(json_response(404, &json!({ "error": "no such endpoint" })));
     }
 
     // ============ 导入 ============

@@ -646,7 +646,19 @@ async function handleAiPutConfig(req, res) {
   if (body.clear_key === true) {
     delete cfg.apiKey;
   } else if (typeof body.api_key === 'string' && body.api_key.trim() !== '') {
-    cfg.apiKey = body.api_key.trim();
+    const k = body.api_key.trim();
+    // 非英文字符一律拒绝，而不是存下去。
+    //
+    // **HTTP 头只能放 ASCII**，一个带中文（或全角括号、中文空格）的密钥
+    // 发出去会被逐字节当成别的字符，拿到的是一串看不懂的 401。
+    // 而这种密钥几乎总是「复制时混进了看不见的东西」，
+    // 用户看到的现象是「明明从官网复制的，怎么就是不对」——
+    // 直接告诉他「密钥里有非英文字符」比让他去猜快得多。
+    // （Rust 版 import.rs 同理，这条是两个后端必须一致的地方之一。）
+    if (/[^\x20-\x7E]/.test(k)) {
+      return send(res, 400, { error: '密钥里有非英文字符。多半是复制时混进了全角符号或中文空格，请重新复制一次。' });
+    }
+    cfg.apiKey = k;
   }
 
   if (provider) cfg.provider = provider;
@@ -685,7 +697,11 @@ async function handleAiModels(req, res) {
   // base_url 只从目录里取，绝不从请求里读 —— 否则这个接口就成了
   // 「让本机去访问任意地址」的跳板（粘贴抓取功能已经踩过这个坑，见 isPrivateHost）。
   const p = findProvider(String(body.provider ?? '').trim());
-  if (!p) return send(res, 400, { error: '不认识的服务商' });
+  // 原来这里 return send(res, 400, ...)。但前端的 api() 一遇到非 2xx 就抛异常，
+  // 用户只能看到一句「接口出错：400」，而下面这句「不认识的服务商」他根本看不到。
+  // 这条接口的所有失败都是 200 + ok:false（超时、连不上、401、格式看不懂…都是），
+  // 这里单独回 400 属于自己给自己开了个后门。桌面版也是 200。
+  if (!p) return send(res, 200, { ok: false, error: '不认识的服务商' });
 
   // 密钥：优先用这次请求里带来的（用户刚贴上还没保存的），
   // 没有就用已保存的。**这条路径不写盘** —— 探测不等于保存，

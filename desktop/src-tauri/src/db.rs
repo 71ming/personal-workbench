@@ -84,6 +84,19 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
     Connection::open(db_path).map_err(|e| format!("打开数据库失败：{}", e))
 }
 
+/// 现在几点（本地时间，格式 `2026-10-14 20:30:00`）。
+///
+/// 为什么要问数据库要时间，而不是在 Rust 里自己算：
+/// 本地时区（东八区）要读系统设置，Rust 标准库不提供，
+/// 引 chrono 就为了打一个时间戳不值当（本项目连依赖都是能不加就不加）。
+/// 而 SQLite 的 `datetime('now','localtime')` 直接给出本地时间，
+/// 跟库里其它时间字段**完全同一个来源** ——
+/// 一个应用里出现两种时间算法是很糟的（差一小时这种 bug 极难查）。
+pub fn now_local(conn: &Connection) -> String {
+    conn.query_row("SELECT datetime('now','localtime')", [], |r| r.get(0))
+        .unwrap_or_default()
+}
+
 // 字段迁移：SQLite 的 CREATE TABLE IF NOT EXISTS **不会修改已存在的表**，
 // 所以老库缺的列必须单独 ALTER 补上。
 // 先查表结构再决定加不加，跑多少次都安全 —— 这条规矩是从 server.js 照搬的，
