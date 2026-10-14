@@ -829,8 +829,11 @@
   .ai-detect-head {
     display: flex; align-items: center; gap: 10px;
     font-size: 11.5px; color: var(--text-mute); margin-bottom: 6px;
+    /* 摘要文案要能换行、按钮不能被压扁：这一行同时放得下长文案和「显示全部」。 */
+    #ai-detect-summary { flex: 1; min-width: 0; }
   }
   .ai-detect-toggle {
+    flex-shrink: 0;
     font-size: 11.5px; font-family: inherit; cursor: pointer;
     color: var(--accent); background: transparent; border: 0; padding: 0;
   }
@@ -3073,7 +3076,7 @@ $('ask-go').addEventListener('click', async () => {
       // 错误也要分类提示，跟第 2 步的「测试连接」一致
       const advice = {
         auth: '去「AI」设置里检查密钥。',
-        model: '去「AI」设置里点「检测模型」重新选。',
+        model: '去「AI」设置里点「检测模型」重新选，列表里没有就自己填模型名。',
         rate: '等一会儿再试，或换一个模型。',
         timeout: '网络可能不稳，再点一次。',
         config: '先去「AI」设置里配好服务商和模型。',
@@ -3216,8 +3219,12 @@ async function aiDetectModels() {
       return;
     }
     aiDetected = { models: r.models || [], all: r.all_models || r.models || [], showAll: false };
+    // 末尾那句「列表可能不全」不是客套，是实测出来的：
+    // 厂商的 /models 只回了 11 个，可 glm-4-flash 明明能调通却根本不在列表里。
+    // 只写「找到 11 个模型」，用户会以为想要的那个不存在，就不去手填名字了。
     $('ai-detect-summary').textContent =
-      `找到 ${r.total} 个模型${r.filtered ? `，其中 ${r.filtered} 个不像是对话用的，先藏起来了` : ''}：`;
+      `找到 ${r.total} 个模型${r.filtered ? `，其中 ${r.filtered} 个不像是对话用的，先藏起来了` : ''}。` +
+      `列表不一定全，没有你要的直接在上面的框里填名字，再点「测试连接」试。`;
     aiRenderDetected();
 
     // 一个都没探测出来才算失败；有结果就直接把第一个填上，省一次手点。
@@ -3380,7 +3387,7 @@ async function aiTestConnection(warnNote = '') {
       // 按 kind 给不同的下一步建议，而不是干巴巴一句「失败」
       const advice = {
         auth: '去服务商控制台确认密钥是不是复制全了、有没有激活。',
-        model: '回到上面点「检测模型」，从它列出来的里面挑一个。',
+        model: '回到上面点「检测模型」挑一个；列表里没有就自己填模型名。',
         rate: '等几分钟再试，或者换一个模型试试。',
         timeout: '网络可能不太稳，可以再点一次。',
         network: '检查一下网络连接。',
