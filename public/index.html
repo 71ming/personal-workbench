@@ -182,6 +182,68 @@
     .brand h1 { display: none; }
   }
 
+  /* ==========================================================
+     v4 · 窄屏列表抽屉（<=640px）
+     ------------------------------------------------------------
+     侧栏写死了 300px（#sidebar { width:300px; flex-shrink:0 }），
+     窗口窄下来正文就被挤扁：640px 时还剩 340px，再窄一点（比如 420px）
+     只剩 120px —— 「已保存」被挤成一列、「截止日期」一个字一行，
+     日期框和「标记完成」直接被裁掉，底下还多出一条横向滚动条。
+
+     把 300px 改小也不解决问题：改成 180px 也就 240px，还是挤。
+     所以 <=640px 干脆换一种排法 —— 侧栏「浮」到正文上面（抽屉）：
+       1. 正文拿回 100% 宽度；
+       2. 列表默认不挡着，点顶栏「列表」才滑出来；
+       3. 点正文空白处、按 Esc、或者选中某一条，自动收回去。
+     下面这些规则全关在 @media 里，宽屏一行都没变。
+     ========================================================== */
+
+  /* 抽屉的开关按钮。宽屏 display:none，界面上完全看不到。 */
+  #drawer-btn {
+    display: none;
+    align-items: center; justify-content: center;
+    width: 34px; height: 34px; flex-shrink: 0; padding: 0;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface); color: var(--text-sub);
+    cursor: pointer;
+  }
+  #drawer-btn:hover { background: #f4f5f7; color: var(--text); }
+  #drawer-btn svg { width: 17px; height: 17px; }
+
+  /* 抽屉的定位参照：侧栏要贴着 main 的左边滑出来 */
+  main { position: relative; }
+
+  @media (max-width: 640px) {
+    #drawer-btn { display: inline-flex; }
+    /* 日历模式下压根没有列表可拉，按钮藏掉，免得点了没反应 */
+    body.cal-mode #drawer-btn { display: none; }
+
+    /* 侧栏脱离 flex 排版，改成绝对定位盖在正文上。
+       脱离排版这一下，正文就自动拿回全部宽度了 ——
+       不用挨个去改各个面板的宽度。 */
+    #sidebar {
+      position: absolute; left: 0; top: 0; bottom: 0; z-index: 70;
+      width: 300px; max-width: 86%;
+      box-shadow: 0 8px 28px rgba(20, 24, 33, .16);
+      transform: translateX(-100%);        /* 默认收在屏幕外面 */
+      transition: transform .18s ease;
+    }
+    body.drawer-open #sidebar { transform: none; }
+
+    /* 抽屉开着时给正文蒙一层灰：既提示「点外面就收」，也把后面的内容压住 */
+    body.drawer-open main::after {
+      content: ''; position: absolute; inset: 0; z-index: 65;
+      background: rgba(20, 24, 33, .32);
+    }
+  }
+
+  /* 极窄（<=480px）：连「记」这个方块也让位出去，把宽度还给搜索框。
+     不让的话，顶栏新加的这个 34px 按钮会把搜索框压到 88px，
+     连占位文字都放不下。 */
+  @media (max-width: 480px) {
+    .brand { display: none; }
+  }
+
   /* ================= 主体两栏 ================= */
   main { flex: 1; display: flex; min-height: 0; }
 
@@ -956,6 +1018,18 @@
 
   <!-- 顶部：品牌 + 全局搜索 -->
   <header>
+    <!-- v4：<=640px 时左侧列表变成抽屉，这个按钮负责拉出 / 收回。
+         宽屏 display:none，界面上看不到。图标故意跟右上角那个「菜单」
+         长得不一样（这个是「几条横线 + 三个点」，那个是三条纯横线），
+         免得两个按钮在手机上一片模糊时分不清。 -->
+    <button id="drawer-btn" title="列表" aria-label="列表"
+            aria-haspopup="true" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round">
+        <path d="M8 6h13M8 12h13M8 18h13"/>
+        <path d="M3.6 6h.01M3.6 12h.01M3.6 18h.01"/>
+      </svg>
+    </button>
     <div class="brand">
       <div class="brand-mark">记</div>
       <h1>个人工作台</h1>
@@ -2090,6 +2164,9 @@ function setCalOpen(on) {
   $('task-pane').classList.toggle('hidden', view !== 'tasks' || calOpen);
   $('cal-toggle').textContent = calOpen ? '☰ 返回列表' : '📅 日历视图';
   if (calOpen) {
+    // 日历模式下侧栏是隐藏的（见 body.cal-mode #sidebar），
+    // 抽屉要是还开着，屏幕上就只剩一层灰蒙，所以必须收掉。
+    setDrawerOpen(false);
     if (!calPick) calPick = calYmd(new Date());
     renderCal();
   }
@@ -3014,6 +3091,9 @@ async function setView(v) {
       v === 'ask' ? '搜索笔记标题和正文…' : '搜索收藏标题和链接…';
     renderHints();
     hideToast();
+    // 窄屏抽屉：换了视图以后原来选中的多半已经对不上了，
+    // 这时一条都没选中，就把列表重新拉出来，不然只剩一片空白的正文。
+    if (nothingSelected()) setDrawerOpen(isNarrow());
   }
 
   // 清掉搜索词就是退出搜索模式。所以哪怕视图没变（从搜索结果点回同类的条目），
@@ -3049,6 +3129,63 @@ const HINTS = {
   ask: '勾几条笔记，然后问一个问题<br><kbd>Esc</kbd> 清空',
 };
 function renderHints() { $('hints').innerHTML = HINTS[view]; }
+// ============ v4：窄屏列表抽屉（<=640px） ============
+// CSS 里 @media (max-width: 640px) 把 #sidebar 变成了浮在正文上面的抽屉。
+// 这里只管状态：按钮点一下开 / 关、点了外面就关、按 Esc 也关。
+// 注意 640 必须和 CSS 里的 @media (max-width: 640px) 对上，以后改断点两处一起改。
+
+const drawerBtn = $('drawer-btn');
+const sidebarEl = $('sidebar');
+const headerEl = document.querySelector('header');
+
+let drawerOpen = false;
+// 跨断点的那一刻记一下。窗口每抖一下就 resize 的话，
+// 不记着的话用户手动收起列表后，窗口随便抖一下又被弹出来。
+let wasNarrow = window.innerWidth <= 640;
+
+function isNarrow() { return window.innerWidth <= 640; }
+
+function setDrawerOpen(open) {
+  drawerOpen = open;
+  // 用 classList 增删（见坑 #7），不要直接赋 className
+  document.body.classList.toggle('drawer-open', open);
+  drawerBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// 当前这个视图里一条都没选中的时候，才有必要把列表留在屏幕上。
+// 必须按视图分开看：切视图不会清掉上一个视图的 currentId，
+// 三个变量一起判断的话，笔记里明明选着一条，切到任务页也会以为「有选中」，
+// 结果列表不弹出来，用户只看到一片空白的任务面板。
+function nothingSelected() {
+  if (view === 'bookmarks') return currentBookmarkId === null;
+  if (view === 'tasks') return currentTaskId === null;
+  if (view === 'ask') return true;      // 问 AI 本来就要在列表里勾，没选中也算空
+  return currentId === null;
+}
+
+drawerBtn.addEventListener('click', () => setDrawerOpen(!drawerOpen));
+
+// 点抽屉外面（也就是正文那一层）就收起来。点在列表里不算外面。
+//
+// 顶栏也要排除掉，不然会出这个毛病：点「任务」标签时 setView 先把抽屉拉开，
+// 可同一次点击接着还会冒泡到 document（事件监听是在监听器之间就清空微任务的），
+// 于是刚拉开的抽屉在同一下里又被当成「点了外面」关掉 —— 切视图后列表永远不弹出来。
+// 而且顶栏本来就压在蒙层之上，它上面的操作本来就不该顺手把抽屉收了。
+document.addEventListener('click', (e) => {
+  if (!drawerOpen) return;
+  if (sidebarEl.contains(e.target) || drawerBtn.contains(e.target)) return;
+  if (headerEl.contains(e.target)) return;
+  setDrawerOpen(false);
+});
+
+// 选中任何一条之后自动收起来，把整屏让给正文。
+// 只判断「点没点到条目 / 新建按钮」，不关心是笔记、任务、收藏还是搜索结果 ——
+// 这几样列表都装在 #sidebar 里，所以一个监听就够了。
+sidebarEl.addEventListener('click', (e) => {
+  if (view === 'ask') return;      // 问 AI 是在列表里打勾，不该把列表收走
+  if (e.target.closest('.item, #new-note, #new-task, #new-bookmark')) setDrawerOpen(false);
+});
+
 // ============ v4：窄屏折叠菜单 ============
 // 顶栏窄到放不下时，右边那三个不常用的功能（问 AI / AI 设置 / 导出备份）
 // 收进 #head-actions 这个下拉里，由 #menu-btn 控制展开收起。
@@ -3085,6 +3222,13 @@ headActions.addEventListener('click', () => setMenuOpen(false));
 // 以后要改断点，这两处得一起改。
 window.addEventListener('resize', () => {
   if (window.innerWidth >= 900) setMenuOpen(false);
+  // 抽屉也只在「跨过 640」那一刻处理
+  const narrow = isNarrow();
+  if (narrow === wasNarrow) return;
+  wasNarrow = narrow;
+  // 刚变窄：还没选中任何东西就把列表拉出来，否则用户只看到一片空白正文，
+  // 会以为应用坏了。   刚变宽：一律收起，body 上不留 drawer-open。
+  setDrawerOpen(narrow && nothingSelected());
 });
 
 // ============ 键盘快捷键 ============
@@ -3099,6 +3243,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (menuIsOpen()) { setMenuOpen(false); return; }   // 菜单开着就先关菜单
     if (calOpen) { setCalOpen(false); return; }   // 日历是最上面那层，先关它
+    if (drawerOpen) { setDrawerOpen(false); return; }   // 抽屉开着就先收抽屉
     // （顺序不能反：菜单开着时先关菜单）
     if (bookmarkConfirmArmed) { bookmarkDisarmDelete(); return; }
     if (taskConfirmArmed) { taskDisarmDelete(); return; }
@@ -3745,6 +3890,9 @@ document.addEventListener('keydown', (e) => {
 
 // ============ 启动 ============
 setMode(mode);
+// 窄屏第一次进来先把列表拉出来：这时什么都还没选，
+// 直接显示正文的话，用户第一眼看到的是一片空白。
+setDrawerOpen(isNarrow());
 renderHints();
 reloadCurrentView();
 // 静默读一次配置，只为顶栏那个小圆点。读不到就算了，不打扰用户。
