@@ -410,6 +410,38 @@ async function fetchBookmarkContent(url) {
   throw new Error(msg);
 }
 
+// 读**二进制**请求体（导入的 .db 文件用它）。
+//
+// 不能用上面的 readBody：那个把 chunk 当字符串拼，
+// 遇到 SQLite 文件里的非法 UTF-8 字节会被替换掉（U+FFFD）—— 文件当场损坏，
+// 表现是「导入报格式错」，跟真实原因完全对不上。
+//
+// 计数也要按字节来：字符串的 length 是字符数，中文文件能差出一倍多。
+const readBytes = (req) => new Promise((resolve, reject) => {
+  const chunks = [];
+  let total = 0;
+  let over = false;
+  req.on('data', c => {
+    total += c.length;
+    // 超限之后**只标记、不再收，也不要 destroy**。
+    //
+    // 一开始写的是「超了就 reject + req.destroy()」，结果 400 还没发出去，
+    // 连接已经被自己掐了：客户端拿到的是 ECONNRESET，而不是那句
+    // 「文件太大了」。实测才暴露出来 —— 接口看着有错误处理，
+    // 实际上一句都送不到用户面前。
+    if (total > 5e6) { over = true; return; }
+    // 兜底：真的不给停（客户端一直发）时，50MB 强制掐断，
+    // 不然内存会一直涨。这是本地单人应用，正常永远走不到这一条。
+    if (total > 50e6) { req.destroy(); reject(new Error('文件太大了（上限 5 MB）。')); }
+    chunks.push(c);
+  });
+  req.on('end', () => {
+    if (over) return reject(new Error('文件太大了（上限 5 MB）。'));
+    resolve(Buffer.concat(chunks));
+  });
+  req.on('error', reject);
+});
+
 const send = (res, code, data) => {
   const body = JSON.stringify(data);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1401,6 +1433,11 @@ async function api(req, res, url) {
     }
 
     if (req.method === 'DELETE' && seg[3] === 'fetch') {   // 丢掉已抓到的内容（换链接前的「手动重来」）
+      // 原来这里是直接 200 + get(id) 的结果，可 id 不存在时 get 返回 undefined，
+      // 于是发出去的是「200 + 一个空 body」—— 桌面版那边是 404。
+      // 两个后端行为必须一样：这个 id 压根不存在，就是 not found。
+      const cur = bmq.get.get(id);
+      if (!cur || cur.deleted_at) return send(res, 404, { error: 'not found' });
       bmq.clearFetch.run(id);
       return send(res, 200, bmq.get.get(id));
     }
@@ -1417,7 +1454,139 @@ async function api(req, res, url) {
     }
   }
 
+  // ============ 导入：把另一份 workbench.db 合并进来 ============
+  // 和桌面版 import.rs 是同一个东西，连返回字段、去重规则、提示文案都一样。
+  // 界���是同一个 index.html，两边必须都认这个接口，否则在一边点一下就报错。
+  //
+  // 请求体是那个 .db 文件的原始字节，不是 JSON：SQLite 是二进制，
+  // 包成 JSON 会被转义成 \u00xx，大小翻好几倍还多一层出错的可能。
+  if (req.method === 'POST' && url.pathname === '/api/import') {
+    let bytes;
+    try {
+      bytes = await readBytes(req);
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+    try {
+      return send(res, 200, importDb(bytes));
+    } catch (e) {
+      // 「这个文件不行」都是用户选错文件，不是服务器故障，所以是 400。
+      return send(res, 400, { error: e.message });
+    }
+  }
+
   return send(res, 404, { error: 'no such endpoint' });
+}
+
+// ---------- 导入 ----------
+//
+// 规则全写在 Rust 版的 import.rs 顶部（那边是主实现，这里是对齐的副本）：
+//   · 只加东西，不删不改已有数据
+//   · 笔记按「标题+正文」、任务按「标题+状态」、收藏按「链接」判重，重复的跳过
+//   · 源库里已删除的行不导入，也拿它们去判重
+//   · 全程一个事务，中途出错整笔回滚，不留「导了一半」的库
+//   · 三张表缺一张就拒收（挡住随便一个 SQLite 文件）
+// SQLite 文件的开头 16 字节。
+// 用 \0 转义写出来，**不要把真正的空字节打进源码文件** ——
+// 那是个看不见、复制粘贴就会丢、编辑器还会顺手改掉的字符。
+// 这种坑的特点是「现在能跑，半年后换台电脑就打不开了」，非常难查。
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
+
+function importDb(bytes) {
+  if (!bytes.length) throw new Error('这个文件是空的。');
+  if (bytes.length < SQLITE_MAGIC.length || !bytes.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC)) {
+    throw new Error('这不是工作台的数据文件（选到的是别的文件）。');
+  }
+
+  // 先落临时文件再打开：node:sqlite 只认文件，而且落一份副本就不用管
+  // 源文件是不是正被谁开着。
+  const tmp = path.join(path.dirname(DB_PATH), `import-${process.pid}-${Date.now()}.tmp`);
+  fs.writeFileSync(tmp, bytes);
+  try {
+    return mergeDb(tmp);
+  } finally {
+    // 成功失败都要删，否则每导一次数据目录里就多一个垃圾文件。
+    try { fs.unlinkSync(tmp); } catch { /* 已经不在了就算了 */ }
+  }
+}
+
+function mergeDb(tmp) {
+  const src = new DatabaseSync(tmp);
+  try {
+    const tables = new Set(
+      src.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name)
+    );
+    for (const t of ['notes', 'tasks', 'bookmarks']) {
+      if (!tables.has(t)) throw new Error(`这不是工作台的数据文件（里面没有 ${t} 表）。`);
+    }
+    // 兼容很老的库：某张表可能还没有某几列，读的时候按实际有的列来。
+    const cols = t => new Set(src.prepare(`PRAGMA table_info(${t})`).all().map(c => c.name));
+    const srcNotes = cols('notes'), srcTasks = cols('tasks'), srcBms = cols('bookmarks');
+
+    // 表名是上面写死的三个常量，不含用户输入，拼进 SQL 是安全的。
+    const rows = (t, have) => src.prepare(
+      have.has('deleted_at') ? `SELECT * FROM ${t} WHERE deleted_at IS NULL`
+                            : `SELECT * FROM ${t}`
+    ).all();
+
+    let added = { notes: 0, tasks: 0, bookmarks: 0 }, skipped = 0;
+
+    db.exec('BEGIN');   // 一个事务：中途失败整笔回滚，不留半截数据
+    try {
+      for (const r of rows('notes', srcNotes)) {
+        const title = str(r.title), body = str(r.body);
+        if (has('SELECT 1 FROM notes WHERE deleted_at IS NULL AND title=? AND body=? LIMIT 1', title, body)) {
+          skipped++; continue;
+        }
+        db.prepare(`INSERT INTO notes (title,body,created_at,updated_at) VALUES (?,?,?,?)`)
+          .run(title, body, str(r.created_at), str(r.updated_at));
+        added.notes++;
+      }
+
+      for (const r of rows('tasks', srcTasks)) {
+        const title = str(r.title);
+        // 老库里可能没有 status，缺了就当待办（跟建表默认值一致）。
+        const status = srcTasks.has('status') && r.status ? r.status : 'todo';
+        if (has('SELECT 1 FROM tasks WHERE deleted_at IS NULL AND title=? AND status=? LIMIT 1', title, status)) {
+          skipped++; continue;
+        }
+        // due_date / completed_at 空值要写成 NULL 而不是空串，
+        // 不然「有截止日期」的显示会跑偏。
+        db.prepare(`INSERT INTO tasks (title,status,due_date,completed_at,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?)`)
+          .run(title, status, nullIfEmpty(r.due_date), nullIfEmpty(r.completed_at),
+               str(r.created_at), str(r.updated_at));
+        added.tasks++;
+      }
+
+      for (const r of rows('bookmarks', srcBms)) {
+        const url = str(r.url);
+        if (!url) { skipped++; continue; }
+        if (has('SELECT 1 FROM bookmarks WHERE deleted_at IS NULL AND url=? LIMIT 1', url)) {
+          skipped++; continue;
+        }
+        db.prepare(`INSERT INTO bookmarks (url,title,created_at,updated_at,content,summary,fetched_at,fetch_error)
+                    VALUES (?,?,?,?,?,?,?,?)`)
+          .run(url, str(r.title), str(r.created_at), str(r.updated_at), str(r.content),
+               str(r.summary), nullIfEmpty(r.fetched_at), nullIfEmpty(r.fetch_error));
+        added.bookmarks++;
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+
+    return { ...added, skipped };
+  } finally {
+    src.close();
+  }
+}
+
+const str = v => (v === null || v === undefined) ? '' : String(v);
+const nullIfEmpty = v => { const s = str(v); return s === '' ? null : s; };
+function has(sql, ...args) {
+  return db.prepare(sql).get(...args) !== undefined;
 }
 
 // ---------- 静态文件 ----------

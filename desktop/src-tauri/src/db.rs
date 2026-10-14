@@ -25,7 +25,7 @@ use std::path::Path;
 // 三张表全部建上，哪怕阶段 0 暂时不实现任务和收藏的接口。
 // 原因是：建表是幂等的（IF NOT EXISTS），多建两张表零成本，
 // 但省掉以后「加了功能才发现老库要迁移」的麻烦。
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS notes (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   title      TEXT NOT NULL DEFAULT '',

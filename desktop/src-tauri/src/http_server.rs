@@ -534,6 +534,27 @@ fn route(
         return Ok(json_response(200, &json!({ "catalog": [], "config": null })));
     }
 
+    // ============ 导入 ============
+    //
+    // 请求体就是那个 .db 文件的**原始字节**（前端用 fetch 的 body 直接送 File）。
+    // 不是 JSON —— SQLite 是二进制，包成 JSON 会被转义成一堆 \u00xx，
+    // 大小翻好几倍，还多一层出错的可能。
+    //
+    // 200 和 400 的分界：文件本身不合格（不是数据库、不是工作台的库、太大了）
+    // 一律 400 + 一句中文说明；这类错误用户改个文件就能重来，不该是 500。
+    // 真正的 500 留给「文件没问题但写不进去」（比如数据库被别的程序锁着）。
+    if seg[0] == "import" && seg.len() == 1 && *method == Method::Post {
+        let bytes = match read_bytes(body) {
+            Ok(b) => b,
+            Err(e) => return Ok(json_response(400, &json!({ "error": e }))),
+        };
+        return match crate::import::run(db_path, &bytes) {
+            Ok(stats) => Ok(json_response(200, &stats)),
+            // 「这个文件不行」都是用户的输入问题，不是服务器故障。
+            Err(e) => Ok(json_response(400, &json!({ "error": e }))),
+        };
+    }
+
     Ok(json_response(404, &json!({ "error": "no such endpoint" })))
 }
 
@@ -620,6 +641,26 @@ fn read_json(body: &mut dyn Read) -> Result<Value, String> {
         .read_to_string(&mut buf)
         .map_err(|e| format!("读请求体失败：{}", e))?;
     Ok(serde_json::from_str(&buf).unwrap_or_else(|_| json!({})))
+}
+
+// 读请求体，**按字节**读（导入的 .db 文件是二进制的）。
+//
+// 跟 read_json 的区别有三点，都是必须的：
+//   1. 收进 Vec<u8> 而不是 String —— 拿 String 装二进制，遇到非法 UTF-8 字节
+//      会被整个替换掉（from_utf8_lossy），文件当场损坏。踩过就是「导入报格式错」。
+//   2. 上限多读 1 个字节 —— 这样「超限了」和「刚好在上限内」能区分开，
+//      好给用户一句「文件太大」而不是一声莫明的失败。
+//   3. 不做 JSON 解析。
+fn read_bytes(body: &mut dyn Read) -> Result<Vec<u8>, String> {
+    let mut limited = body.take(MAX_BODY + 1);
+    let mut buf = Vec::new();
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("读文件失败：{}", e))?;
+    if buf.len() as u64 > MAX_BODY {
+        return Err(format!("文件太大了（上限 {} MB）。", MAX_BODY / 1024 / 1024));
+    }
+    Ok(buf)
 }
 
 fn content_type(value: &str) -> Header {

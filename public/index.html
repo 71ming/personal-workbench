@@ -103,15 +103,15 @@
      原来这条只写在 #export-btn 上，v3 加 AI 按钮时没吃到样式，
      结果按钮塌成一条竖着的窄片（文字被挤到换行）—— 一眼就看得出来是外挂上去的。
      共用 class 之后，以后再加第三个头部按钮也不会再犯同样的错。 */
-  #export-btn, #ai-btn, #ask-btn {
+  #import-btn, #export-btn, #ai-btn, #ask-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 7px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
     color: var(--text-sub); background: var(--surface); white-space: nowrap;
     border: 1px solid var(--border); border-radius: var(--radius);
     transition: all .15s;
   }
-  #export-btn:hover, #ai-btn:hover, #ask-btn:hover { background: #f4f5f7; color: var(--text); }
-  #export-btn svg, #ai-btn svg, #ask-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  #import-btn:hover, #export-btn:hover, #ai-btn:hover, #ask-btn:hover { background: #f4f5f7; color: var(--text); }
+  #import-btn svg, #export-btn svg, #ai-btn svg, #ask-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
   /* ==========================================================
      v4 · 顶栏窄屏折叠
@@ -169,7 +169,7 @@
     #head-actions.open { display: flex; }
 
     /* 竖排菜单里的按钮：撑满一整行，图标和文字靠左，读起来才像一份菜单 */
-    #ask-btn, #ai-btn, #export-btn {
+    #ask-btn, #ai-btn, #import-btn, #export-btn {
       width: 100%; justify-content: flex-start; padding: 9px 12px;
     }
 
@@ -1066,6 +1066,15 @@
         </svg>
         AI<span class="ai-dot" id="ai-dot"></span>
       </button>
+      <!-- 导入备份：把另一份工作台数据文件（workbench.db）里的笔记/任务/收藏合并进来。
+           只加不删：重复的自动跳过，源文件里已删除的不导。 -->
+      <button id="import-btn" title="从另一份工作台数据文件里合并笔记、任务、收藏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 4h14"/>
+        </svg>
+        导入备份
+      </button>
       <!-- 导出备份：数据全在数据库文件里，这是唯一一份能在别处打开的副本 -->
       <button id="export-btn" title="把全部笔记导出成一个 Markdown 文件">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1293,6 +1302,8 @@
 </div>
 
 <!-- 删除后的撤销条 -->
+<!-- 导入用的文件选择框：平时藏在页面里，点「导入备份」才弹出来 -->
+<input type="file" id="import-file" class="hidden" accept=".db,.sqlite,.sqlite3">
 <div id="toast" class="hidden">
   <span id="toast-msg"></span>
   <button id="toast-undo">撤销</button>
@@ -1963,6 +1974,8 @@ let toastTimer = null;
 // 随时可以用 POST /api/notes/:id/restore 捞回来。
 function showUndo(info) {
   lastDeleted = info;
+  // 上一条提示如果是 showNotice 发的，「撤销」按钮是藏着的，这里要放回来
+  $('toast-undo').classList.remove('hidden');
   $('toast-msg').textContent = `已删除「${info.title}」`;
   $('toast').classList.remove('hidden');
   clearTimeout(toastTimer);
@@ -2021,6 +2034,52 @@ $('export-btn').addEventListener('click', async () => {
   a.click();
   a.remove();
 });
+// 导入备份：把另一份 workbench.db 合并进当前库。
+//
+// 两个约定：
+//   1. **先存后导**：跟导出一样先 flushSaves()。不存的话，
+//      正在编辑框里还没落库的那几条会以「不存在」的身份参与去重，
+//      导进来一份重复的，编辑框里的内容还留在本地。
+//   2. **导完三个列表都重拉**：导入的可能是任何一种，
+//      只刷当前视图的话，切过去一看还是旧的，会以为没导进去。
+$('import-btn').addEventListener('click', () => $('import-file').click());
+
+$('import-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  // 选完立刻清空。同一个文件连着选两次时，input 的 value 没变就不会再触发 change，
+  // 用户会以为按钮坏了 —— 这个坑在所有 file input 上都有。
+  e.target.value = '';
+  if (!file) return;
+
+  await flushSaves();
+  try {
+    // 这里不用 api()：它会带 JSON 的 Content-Type，而这里要送的正是二进制本身
+    //（包成 JSON 的话 SQLite 的字节会被转义成一堆 \u00xx，体积翻好几倍）。
+    const res = await fetch('/api/import', { method: 'POST', body: file });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `接口出错：${res.status}`);
+    const total = data.notes + data.tasks + data.bookmarks;
+    showNotice(total
+      ? `导入完成：笔记 ${data.notes} 条、任务 ${data.tasks} 条、收藏 ${data.bookmarks} 条，重复的 ${data.skipped} 条已跳过。`
+      : '这个文件里的东西都已经有了，没有新增。');
+    await Promise.all([loadList(), loadTasks(), loadBookmarks()]);
+  } catch (err) {
+    showBanner('导入失败：' + err.message);
+  }
+});
+
+// 一句「刚才那步做成了」的提示。
+// 复用底部撤销条的样式，但要把「撤销」按钮藏起来：
+// 它是为删除准备的，放在导入提示上会让人以为点它能撤销导入（其实点了也没用）。
+// 所以 showUndo() 里必须把它重新显示出来 —— 漏了那一步，
+// 「用过一次导入提示之后，删除就再也撤销不了了」，这种 bug 极难联想到。
+function showNotice(msg) {
+  $('toast-msg').textContent = msg;
+  $('toast-undo').classList.add('hidden');
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 8000);
+}
 
 // 标题和正文变化 → 自动保存 + 刷新预览
 titleEl.addEventListener('input', () => { scheduleSave(); renderPreview(); });

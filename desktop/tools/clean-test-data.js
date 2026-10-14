@@ -18,6 +18,13 @@ const TEST_HOSTS = ['example.com', 'example.org', 'www.iana.org'];
 // 万一你自己真收藏了一个内网地址（比如公司 Wiki），不能被误删。
 const ATTACK_TITLE = /^攻击测试$/;
 
+// test-import.js 留下的：标题里带「导入测试」三个字，链接指向 import-test 开头的域名。
+//
+// 为什么要专门认这一类：测试脚本**中途崩掉的时候来不及自己清理**（实测就崩过一次），
+// 残留会让下一轮测试全线变红 —— 而且失败信息长得像「功能坏了」，
+// 实际上只是上一轮忘了收摊。认出来清掉，是省时间的关键。
+const IMPORT_TITLE = /^导入测试\d+/;
+
 async function req(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -38,9 +45,10 @@ async function req(method, path, body) {
 
   const targets = all.body.filter((b) => {
     if (ATTACK_TITLE.test((b.title || '').trim())) return true;
+    if (IMPORT_TITLE.test((b.title || '').trim())) return true;
     try {
       const h = new URL(b.url).hostname.toLowerCase();
-      return TEST_HOSTS.includes(h);
+      return TEST_HOSTS.includes(h) || /^import-test[\d.-]*\.example\.com$/.test(h);
     } catch {
       return false;
     }
@@ -62,8 +70,21 @@ async function req(method, path, body) {
   const tasks = await req('GET', '/api/tasks');
   if (Array.isArray(tasks.body)) {
     for (const t of tasks.body) {
-      if (/未完成逾期|未完成将来|未完成无日期|已完成无日期|幂等测试|待删除$/.test(t.title)) {
+      if (/未完成逾期|未完成将来|未完成无日期|已完成无日期|幂等测试|待删除$/.test(t.title)
+          || IMPORT_TITLE.test((t.title || '').trim())) {
         await req('DELETE', `/api/tasks/${t.id}`);
+        okCount++;
+      }
+    }
+  }
+
+  // 笔记也要清：import 测试会在库里留下笔记和收藏，光清一半的话，
+  // 下一轮还是对不上（那几条笔记会一直躺在列表里）。
+  const notes = await req('GET', '/api/notes');
+  if (Array.isArray(notes.body)) {
+    for (const n of notes.body) {
+      if (IMPORT_TITLE.test((n.title || '').trim())) {
+        await req('DELETE', `/api/notes/${n.id}`);
         okCount++;
       }
     }

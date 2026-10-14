@@ -21,6 +21,7 @@
 pub mod db;
 pub mod fetch;
 pub mod http_server;
+pub mod import;
 
 use std::path::PathBuf;
 use tauri::Manager;
