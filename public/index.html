@@ -692,6 +692,13 @@
     background: #eaf1fe; color: var(--accent); border: 1px solid #cfdefb;
   }
   .cite:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  /* 模型编出来的引用编号：正文原位标红。
+     颜色沿用 --danger，和 .ask-warn 那条警告是一套的，看着就知道是一回事。 */
+  .cite-bad {
+    color: var(--danger); font-weight: 600;
+    border-bottom: 1px dashed #f3c9cb; cursor: help;
+  }
+  .cite-bad:hover { background: #fdeced; }
 
   .ask-meta {
     margin-top: 16px; padding: 9px 11px; border-radius: 5px;
@@ -2970,14 +2977,25 @@ function renderAskAnswer(d) {
   //（笔记正文里写着内部约定时特别容易），那种原文会被误当成引用、编号又对不上引用表，
   // 结果就是回答里凭空少掉几个词。后端给的是 \u0002N\u0002，只有真有引用的地方才有，
   // 且 N 直接就是笔记编号，不用再绕一层下标映射。
-  $('ask-answer-body').innerHTML = renderMarkdown(raw).replace(
-    /\u0002(\d+)\u0002/g,
-    (m, n) => {
-      const c = d.cited.find(x => x.index === Number(n));
-      if (!c) return '';       // 后端没这条引用 → 宁可不显示，也不要指错笔记
-      return `<span class="cite" data-note="${c.id}" title="打开《${esc(c.title)}》">${c.index}</span>`;
-    }
-  );
+  $('ask-answer-body').innerHTML = renderMarkdown(raw)
+    .replace(
+      /\u0002(\d+)\u0002/g,
+      (m, n) => {
+        const c = d.cited.find(x => x.index === Number(n));
+        if (!c) return '';       // 后端没这条引用 → 宁可不显示，也不要指错笔记
+        return `<span class="cite" data-note="${c.id}" title="打开《${esc(c.title)}》">${c.index}</span>`;
+      }
+    )
+    // \u0003 是后端标出来的「这个编号是模型编的」。
+    // 之前这类引用原样留在正文里，就是一段混在句子中的普通文字，
+    // 扫一眼完全看不出来，只能靠回答底下那句汇总警告回去数 —— 现在在原位标红。
+    .replace(
+      /\u0003(\d+)\u0003/g,
+      (m, n) => {
+        const sent = d.sent_notes?.length || 0;
+        return `<span class="cite-bad" title="模型引用了第 ${n} 条笔记，但这次只发了 ${sent} 条 —— 这个编号是它编的">[笔记${n}]</span>`;
+      }
+    );
   askLastAnswer = raw;
 
   // 这次发了什么、花了多少 —— 摆在回答下面，用户能核实
@@ -3002,10 +3020,14 @@ function renderAskAnswer(d) {
   }
 
   // 模型引用了不存在的编号 → 它在编。这条要显眼，不能藏在角落。
+  // 正文里的红色标记回答「红在哪」，下面这句回答「为什么红」，两边配合才看得出问题。
   const warn = $('ask-warn');
   if (d.bad_citations > 0) {
-    warn.innerHTML = `<b>注意：</b>回答里引用了 ${d.bad_citations} 处不存在的笔记编号。`
-      + `这通常意味着模型在编内容，请对照左边勾的笔记核实。`;
+    const nums = (d.bad_nums || []).map(x => `[笔记${x}]`).join('、');
+    const sent = d.sent_notes?.length || 0;
+    warn.innerHTML = `<b>注意：</b>正文里标红的 <b>${esc(nums)}</b> 是模型编的编号`
+      + ` —— 这次只发了 ${sent} 条笔记，根本没有这些号。`
+      + `标红那句话的出处不可信，请对照左边勾的笔记核实。`;
     warn.classList.remove('hidden');
   } else {
     warn.classList.add('hidden');
@@ -3084,8 +3106,9 @@ $('ask-go').addEventListener('click', async () => {
 // 复制回答。只复制文字（角标是界面元素，不进剪贴板）
 $('ask-copy').addEventListener('click', async () => {
   if (!askLastAnswer) return;
-  // 把 \u0002N\u0002 占位换回 [笔记N]，复制出去别人也看得懂
-  const text = askLastAnswer.replace(/\u0002(\d+)\u0002/g, '[笔记$1]');
+  // 把 N（真引用）和 N（模型编的编号）都还原成 [笔记N]，复制出去别人也看得懂
+  const text = askLastAnswer.replace(/\u0002(\d+)\u0002/g, '[笔记$1]')
+                            .replace(/\u0003(\d+)\u0003/g, '[笔记$1]');
   try {
     await navigator.clipboard.writeText(text);
     $('ask-copy').textContent = '已复制';

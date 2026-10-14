@@ -1001,7 +1001,7 @@ function aiSystemPrompt(noteCount) {
 // 这种情况**保留原样并记下来**，但不生成链接 —— 显示层会提示「模型引用了不存在的笔记」。
 function parseCitations(answer, notes) {
   const used = new Set();
-  let bad = 0;
+  const badNums = [];
   // 捕获组**只圈数字**：[笔记1] → num = '1'。
   // （第一版写成 \[(笔记\s*\d+)\]，把「笔记」两个字也圈进去了，
   //  于是 Number('笔记1') = NaN，notes[NaN-1] 是 undefined，
@@ -1009,7 +1009,14 @@ function parseCitations(answer, notes) {
   const text = String(answer).replace(/\[笔记\s*(\d+)\]/g, (m, num) => {
     const idx = Number(num);
     const note = notes[idx - 1];
-    if (!note) { bad++; return m; }
+    if (!note) {
+      // 编号越界 = 模型在编一条我没发过的笔记。
+      // 之前这里是「原样保留」，结果页面上 [笔记4] 就是一段混在句子里的普通文字，
+      // 扫一眼根本看不出来，只能靠回答底下那条汇总警告 —— 但警告说「第几处」，
+      // 用户还得自己回去数。这里改成 \u0003 占位，让前端**在正文原位**把它标红。
+      badNums.push(idx);
+      return `\u0003${idx}\u0003`;
+    }
     used.add(idx);
     // 换成内部标记，前端再渲染成可点回原笔记的按钮。
     //
@@ -1020,7 +1027,9 @@ function parseCitations(answer, notes) {
     // \u0002 是控制字符，模型生成不出来，永远撞不了车。
     return `\u0002${idx}\u0002`;
   });
-  return { text, cited: [...used], bad };
+  // badNums 是模型编出来的编号（可能有重复，去重后返回）；
+  // 前端警告文案要靠它说清「你只勾了几条」，而不是干巴巴一句「引用了 N 处」。
+  return { text, cited: [...used], bad: badNums.length, bad_nums: [...new Set(badNums)] };
 }
 
 // 供前端调用的问答接口。
@@ -1061,7 +1070,7 @@ async function handleAiAsk(req, res) {
     return send(res, 200, { ...r, sent_notes: notes.length, ms });
   }
 
-  const { text, cited, bad } = parseCitations(r.content, notes);
+  const { text, cited, bad, bad_nums } = parseCitations(r.content, notes);
 
   return send(res, 200, {
     ok: true,
@@ -1071,6 +1080,8 @@ async function handleAiAsk(req, res) {
     cited: cited.map(i => ({ index: i, id: notes[i - 1].id, title: notes[i - 1].title })),
     // 模型引用了不存在的编号 = 它在编。必须告诉用户。
     bad_citations: bad,
+    // 具体是哪几个编号，前端拿它把正文里那几处标红
+    bad_nums,
     sent_notes: notes.map(n => ({ id: n.id, title: n.title })),
     usage: r.usage,
     cost: r.cost,
