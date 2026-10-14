@@ -6,6 +6,11 @@ data/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 
+# 打好的安装包（每个 2MB 左右，二进制）。
+# 放在仓库外是为了清target 缓存时不把它一起清掉；
+# 但它也不该进 git 历史 —— 发布走 GitHub Releases 的附件，不靠版本库。
+desktop/release/*.exe
+
 # 系统与编辑器杂项
 .DS_Store
 Thumbs.db
