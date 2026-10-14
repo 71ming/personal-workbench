@@ -103,7 +103,14 @@ fn resolve_port() -> u16 {
 //
 // 数据库路径由调用方传进来；前端目录可以是 None
 //（意思是「磁盘上没有，用内嵌的那一份」，见 EMBEDDED_INDEX）。
-pub fn serve(db_path: PathBuf, public_dir: Option<PathBuf>) -> Result<u16, String> {
+//
+// app_handle 传进来只为自动更新那两个接口（update.rs 顶部解释了为什么不能走前端 IPC）。
+// 传 Option 是为了**单元测试能不起 Tauri 就调路由** —— 测试里没有 AppHandle。
+pub fn serve(
+    db_path: PathBuf,
+    public_dir: Option<PathBuf>,
+    app_handle: Option<tauri::AppHandle>,
+) -> Result<u16, String> {
     let port = resolve_port();
 
     // 绑 127.0.0.1 而不是 0.0.0.0。
@@ -179,19 +186,32 @@ pub fn serve(db_path: PathBuf, public_dir: Option<PathBuf>) -> Result<u16, Strin
     // 那时正确做法是抓取丢进后台线程 + 轮询状态，不是简单地开线程。
     std::thread::spawn(move || {
         for request in server.incoming_requests() {
-            handle(request, &db_path, &public_dir);
+            handle(request, &db_path, &public_dir, app_handle.as_ref());
         }
     });
 
     Ok(bound_port)
 }
 
-fn handle(mut request: Request, db_path: &Path, public_dir: &Option<PathBuf>) {
+fn handle(
+    mut request: Request,
+    db_path: &Path,
+    public_dir: &Option<PathBuf>,
+    app_handle: Option<&tauri::AppHandle>,
+) {
     let url = request.url().to_string();
     let method = request.method().clone();
     let (path, query) = split_url(&url);
 
     if path.starts_with("/api/") {
+        // 自动更新那两个接口在这里单独接住，**不进 route()**：
+        // 它们需要 AppHandle（updater 只能从 Tauri 手里拿），
+        // 而 route() 的参数是为「只需要数据库」的那些接口设计的，不该给它加负担。
+        if path.starts_with("/api/update/") {
+            let response = update_route(&method, &path, app_handle);
+            let _ = request.respond(response);
+            return;
+        }
         let response = match route(&method, &path, &query, request.as_reader(), db_path) {
             Ok(resp) => resp,
             Err(e) => json_response(500, &json!({ "error": e })),
@@ -202,6 +222,46 @@ fn handle(mut request: Request, db_path: &Path, public_dir: &Option<PathBuf>) {
 
     // 不带 /api/ 的一律当静态文件。
     let _ = request.respond(serve_static(&path, public_dir.as_deref()));
+}
+
+// ---------- 自动更新 ----------
+//
+// 为什么永远返回 200，连「后端不支持」也是 200：
+// 前端的 api() 遇到非 2xx 会直接抛异常，用户只能看到「接口出错：500」。
+// 「Node 版不支持自动更新」是一条**要给人看的正常说明**，不是故障。
+fn update_route(
+    method: &Method,
+    path: &str,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Response<Box<dyn Read + Send>> {
+    // 只认结尾一段，前面多几段斜杠也照样认 —— 和别的接口的切法保持一致。
+    // method 用 clone 而不是 `*method`：tiny_http 的 Method 不实现 Copy，
+    // 直接解引用搬运会报「cannot move out of `*method`」。
+    let tail = path.trim_start_matches("/api/update/").trim_matches('/');
+
+    match (tail, method.clone()) {
+        ("check", Method::Get) => match app_handle {
+            Some(app) => json_response(200, &crate::update::check(app)),
+            None => json_response(
+                200,
+                &json!({
+                    "ok": false, "kind": "unsupported",
+                    "message": "这个后端不支持自动更新",
+                }),
+            ),
+        },
+        ("install", Method::Post) => match app_handle {
+            Some(app) => json_response(200, &crate::update::install(app)),
+            None => json_response(
+                200,
+                &json!({
+                    "ok": false, "kind": "unsupported",
+                    "message": "这个后端不支持自动更新",
+                }),
+            ),
+        },
+        _ => json_response(404, &json!({ "error": "no such endpoint" })),
+    }
 }
 
 // ---------- 路由 ----------

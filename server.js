@@ -1282,8 +1282,37 @@ async function api(req, res, url) {
   }
 
   // 问 AI：只发用户勾选的笔记
-  if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
+if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
     return await handleAiAsk(req, res);
+  }
+
+  // ============ 自动更新 ============
+  //
+  // 这两个接口在 Node 版**永远回答「不支持」**。
+  //
+  // 为什么要有：界面 public/index.html 是两个后端共用的，
+  // 上面加了「检查更新」按钮，Node 版不接这个路径就会 404，
+  // 一点就报「接口出错」—— 那是假的，程序没坏，是这个版本压根没有这个能力。
+  //
+  // 为什么答 200 而不是 404：前端 api() 遇非 2xx 会抛异常，
+  // 用户只能看到「接口出错：404」，看不到「这个版本不支持自动更新」这句能照做的说明。
+  //
+  // 自动更新本体只在桌面版（Tauri）里有 —— 那要 Rust 侧的 updater 插件，
+  // Node 这里没有对应的东西，也不该去实现一个。
+  const UNSUPPORTED_UPDATE = {
+    ok: false,
+    kind: 'unsupported',
+    message: 'Node 版不支持自动更新，要换新版本请重新下载安装包。',
+    // 这个仓库是零依赖的，连 package.json 都没有，**没有版本号可读**。
+    // 与其编一个数字出来（编错了用户会拿它跟安装包对，对不上更困惑），
+    // 不如照实说这是 Node 版。界面只需要拿它显示一行字。
+    current: 'Node 版',
+  };
+  if (req.method === 'GET' && url.pathname === '/api/update/check') {
+    return send(res, 200, UNSUPPORTED_UPDATE);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/update/install') {
+    return send(res, 200, UNSUPPORTED_UPDATE);
   }
 
   // 笔记列表 / 搜索

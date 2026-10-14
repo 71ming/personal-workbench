@@ -1,0 +1,8 @@
+﻿cargo :    Compiling workbench v0.6.0 (E:\个人工作台\desktop\src-tauri)
+所在位置 行:1 字符: 88
++ ...  + $env:PATH; cd E:\个人工作台\desktop\src-tauri; cargo build 2>&1 | Out-F ...
++                                                  ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wo...ktop\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.74s

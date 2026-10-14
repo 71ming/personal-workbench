@@ -23,6 +23,7 @@ pub mod db;
 pub mod fetch;
 pub mod http_server;
 pub mod import;
+pub mod update;
 
 use std::path::PathBuf;
 use tauri::Manager;
@@ -42,7 +43,21 @@ use tauri::Manager;
 // 这一行会自动生效，不用改任何逻辑。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // 自动更新插件。注册放在 setup 之前，而且只在桌面端注册：
+    // 官方支持矩阵是 Windows / macOS / Linux，Android 和 iOS 不支持
+    // （移动端要用应用商店那套机制）。不加这个条件，
+    // 将来加移动端目标时会编译失败在一个看不出原因的地方。
+    //
+    // ⚠️ 这段**不能写成** `.plugin(...)` 直接串进下面那条链：
+    // 属性 `#[cfg(desktop)]` 夹在方法链中间，解析器读到 `.` 找不到表达式，
+    // 报出来的是「expected expression, found `.`」—— 跟「插件注册写错了」毫无关系，
+    // 能让人查半天。所以这里拆成两个 builder 再 let 起来。
+    #[cfg(desktop)]
+    let builder = tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(not(desktop))]
+    let builder = tauri::Builder::default();
+
+    builder
         .setup(|app| {
             // 这里面任何一步失败都要走 report_failure()，**不能只用 `?` 往上抛**。
             //
@@ -108,7 +123,10 @@ fn bootstrap(app: &tauri::App) -> Result<(), String> {
     let db_path = data_dir.join("workbench.db");
 
     // ---- 3. 起 HTTP 服务 ----
-    let port = http_server::serve(db_path, public_dir)?;
+    //
+    // AppHandle 一起传进去：自动更新要靠它拿 updater（界面没有 Tauri IPC，
+    // 只能在 Rust 侧调，详见 update.rs 顶部）。
+    let port = http_server::serve(db_path, public_dir, Some(app.handle().clone()))?;
 
     // ---- 4. 窗口指向真实地址 ----
     //
@@ -149,7 +167,7 @@ fn report_failure(app: &tauri::App, message: &str) {
         "个人工作台启动失败\n{}\n\n\
          原因：\n{}\n\n\
          ---\n\
-         这一版只实现了「笔记」，任务/收藏是空的，正常使用不受影响。\n\
+         这个软件的数据在 AppData 目录里，不会因为启动失败丢东西，可以放心重试。\n\
          如果反复出现，请把本文件发给开发者。\n",
         chrono_now(),
         message

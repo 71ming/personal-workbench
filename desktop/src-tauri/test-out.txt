@@ -1,0 +1,53 @@
+﻿cargo :    Compiling workbench v0.6.0 (E:\个人工作台\desktop\src-tauri)
+所在位置 行:1 字符: 88
++ ... " + $env:PATH; cd E:\个人工作台\desktop\src-tauri; cargo test 2>&1 | Out-F ...
++                                                   ~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wo...ktop\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.07s
+     Running unittests src\lib.rs (target\debug\deps\workbench_lib-f7eecc21589e4c53.exe)
+
+running 27 tests
+test ai::tests::打码只露头尾 ... ok
+test ai::tests::非对话模型要被剔掉 ... ok
+test ai::tests::提示词必须写明没有就说没有 ... ok
+test ai::tests::模型名错了要能认出来 ... ok
+test ai::tests::引用只圈数字 ... ok
+test fetch::tests::主机名切得干净 ... ok
+test ai::tests::笔记正文超长按字符截不切坏汉字 ... ok
+test fetch::tests::不误伤公网地址 ... ok
+test fetch::tests::切出来的名字仍然拦得住 ... ok
+test fetch::tests::实体能解开 ... ok
+test ai::tests::价格没收录就说没有_不编数字 ... ok
+test fetch::tests::拦得住内网地址 ... ok
+test fetch::tests::重定向能补成完整网址 ... ok
+test fetch::tests::带属性的标签也能认出来 ... ok
+test fetch::tests::正文能从真实结构里抠出来 ... ok
+test ai::tests::问题不能空 ... ok
+test ai::tests::一条都不勾就什么都别发 ... ok
+test update::tests::四类失败对应四个前端kind值 ... ok
+test update::tests::四类失败都有人话 ... ok
+test update::tests::版本号跟得上编译期那个 ... ok
+test update::tests::签名不对时必须说清楚没有安装 ... ok
+test import::tests::不是数据库文件会被挡掉 ... ok
+test import::tests::是数据库但没有工作台的表_也要挡掉 ... ok
+test import::tests::导入_没抓过的收藏_fetched_at_是_null_不是空串 ... ok
+test import::tests::导入_老的没有抓取字段的库也能导 ... ok
+test import::tests::导入_保留原时间_不给空日期 ... ok
+test import::tests::导入_去重_跳过软删除 ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src\main.rs (target\debug\deps\workbench-f8b9fa7f6bb42a4e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests workbench_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -10,7 +10,7 @@
 
 [package]
 name = "workbench"
-version = "0.5.0"
+version = "0.6.0"
 description = "个人工作台"
 authors = ["you"]
 edition = "2021"
@@ -68,6 +68,20 @@ reqwest = { version = "0.12", default-features = false, features = [
   "charset",
   "http2",
 ] }
+
+# ---------------------------------------------------------------------------
+# 自动更新（阶段 3）
+#
+# 为什么只用这一个插件：重启应用不需要 tauri-plugin-process，
+# Rust 侧 app.restart() 就够了（那是 Tauri 核心的能力，不是插件）。
+#
+# 关键约束：这个界面**拿不到 Tauri 的 IPC**（withGlobalTauri = false，
+# 而且窗口加载的是 http://127.0.0.1，不是 tauri:// 协议）。
+# 所以官方文档里那段前端调 @tauri-apps/plugin-updater 的写法在这里用不了，
+# 只能由 Rust 侧用 AppHandle 调，再包成两个本地 HTTP 接口给界面。
+# 详见 update.rs 顶部。
+# ---------------------------------------------------------------------------
+tauri-plugin-updater = "2"
 
 # ---------------------------------------------------------------------------
 # 发布版体积优化
