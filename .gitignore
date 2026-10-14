@@ -11,6 +11,16 @@ desktop/src-tauri/gen/
 # 但它也不该进 git 历史 —— 发布走 GitHub Releases 的附件，不靠版本库。
 desktop/release/*.exe
 
+# 更新清单同理：它每次发版都会变，是**产物**不是源码。
+# 它的内容由 tools/make-latest-json.js 生成。
+desktop/release/latest.json
+
+# 编译/测试的输出日志。我习惯 `cargo build 2>&1 | Out-File err.txt`，
+# 不小心就 git add . 进去了 —— 它每次都不一样，会把历史冲得很难看。
+build-err.txt
+test-out.txt
+*.bak
+
 # 系统与编辑器杂项
 .DS_Store
 Thumbs.db
