@@ -1,0 +1,53 @@
+# 个人工作台 · 桌面版（Tauri 2）
+#
+# 这个工程的定位：把原来「Node 服务 + 浏览器」的形态，
+# 换成一个有图标、双击就能开、不弹黑色命令行窗口的桌面软件。
+#
+# 关键设计（改动前务必先读 http_server.rs 里的说明）：
+#   窗口加载的是 http://127.0.0.1:端口，不是文件。
+#   所以 public/index.html 里那些 fetch('/api/xxx') 的相对路径原样能用，
+#   **前端一行都不用改**。
+
+[package]
+name = "workbench"
+version = "0.5.0"
+description = "个人工作台"
+authors = ["you"]
+edition = "2021"
+
+# Tauri 2 在 Windows/macOS/Linux 上都要求这几个 crate 类型。
+# mobile 那行是给将来的 Android/iOS 留的，现在用不上，但加上不影响桌面构建。
+[lib]
+name = "workbench_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 数据库。bundled 这个 feature 的意思是：把 SQLite 源码直接编译进我们的 exe，
+# 不依赖电脑上有没有装 SQLite，也不需要装任何运行时。
+# —— 这一条保住了「拷到哪台电脑都能直接跑」这个特性。
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# 极简 HTTP 服务端。同步模型、没有 async，配上同步的 rusqlite 正好。
+# 没有用 axum 那类异步框架，是因为这个应用是「一个人本地用」，
+# 并发极低，同步模型最简单也最不容易写错。
+tiny_http = "0.12"
+
+# ---------------------------------------------------------------------------
+# 发布版体积优化
+# Tauri 的卖点就是比 Electron 小，这些开关直接决定安装包大小。
+# 实测参考：一个带 SQLite 的 Tauri 应用，开满这套约 6-10MB；
+# 不开这套（默认）可能到 20MB 以上。
+# ---------------------------------------------------------------------------
+[profile.release]
+opt-level = "z"     # "z" 偏体积，"3" 偏速度。桌面小工具选体积。
+lto = true           # 链接时优化，跨模块裁掉没用的代码
+codegen-units = 1   # 只用一个编译单元，优化效果最好（编译慢一点）
+strip = true         # 剥掉调试符号，能省好几 MB
+panic = "abort"     # panic 直接终止，不展开栈
