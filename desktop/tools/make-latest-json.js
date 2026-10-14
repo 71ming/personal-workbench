@@ -34,14 +34,32 @@ if (!/^\d+\.\d+\.\d+$/.test(VERSION)) {
 }
 
 const TAG = `v${VERSION}`;
-const NAME = `个人工作台_${VERSION}_x64-setup.exe`;
+
+// 附件名必须是**纯 ASCII**。
+//
+// 实测踩到的大坑：原来这里写的是「个人工作台_0.6.2_x64-setup.exe」，
+// 但这个文件名是作为命令行参数传给 gh 的，PowerShell 5.1 传中文参数会掉编码 ——
+// GitHub 上实际存下来的名字变成了「_0.6.2_x64-setup.exe」（中文前缀整个没了），
+// 而清单里的 url 指向的还是中文名，于是点「下载并安装」必然 404。
+//
+// 这个坑特别阴险的地方在于：**「检查更新」照样显示一切正常**
+// （清单能取到、版本号对得上），非要点到真的下载安装才会炸。
+//
+// 文件名走 ASCII 之后，这条路上就再也没有中文要编码了，
+// 从根上断掉这类问题。软件中文名放在 release 标题里，一样能看见。
+const NAME = `PersonalWorkbench_${VERSION}_x64-setup.exe`;
 const NOTES = process.argv[3] || '';
 
-const sigPath = path.join(NSIS_DIR, `${NAME}.sig`);
-if (!fs.existsSync(sigPath)) {
-  console.error(`找不到签名文件：${sigPath}\n先跑 cargo tauri signer sign`);
+// 签名文件是**跟着 NSIS 那个原始包名**走的（签名的时候包名还是中文的），
+// 所以这里按后缀找，不按 NAME 拼 —— 否则每换一次附件命名规则就得重签一次。
+const sigName = fs
+  .readdirSync(NSIS_DIR)
+  .find(n => n.endsWith(`_${VERSION}_x64-setup.exe.sig`));
+if (!sigName) {
+  console.error(`在 ${NSIS_DIR} 里找不到 _${VERSION}_x64-setup.exe.sig\n先跑 cargo tauri signer sign`);
   process.exit(1);
 }
+const sigPath = path.join(NSIS_DIR, sigName);
 const sig = fs.readFileSync(sigPath, 'utf8').trim();
 // 签名文件的开头固定是 base64 编码的 "untrusted comment: ..."。
 // 对不上就说明拿错了文件（比如误拿了公钥）—— 那会让所有用户的更新全部失败。
@@ -65,9 +83,31 @@ const manifest = {
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(path.join(OUT_DIR, 'latest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-fs.copyFileSync(path.join(NSIS_DIR, NAME), path.join(OUT_DIR, NAME));
+// NSIS 打出来的原始文件带中文名，这里复制成 ASCII 名。
+// 顺带记一条：**复制而不是改名** —— 原始包留在 target\release\bundle\nsis 里，
+// 改掉它会让下次打包时 makensis 的输出路径对不上，多余的麻烦。
+const src = fs.readdirSync(NSIS_DIR).find(n => n.endsWith(`_${VERSION}_x64-setup.exe`));
+if (!src) {
+  console.error(`在 ${NSIS_DIR} 里找不到 _${VERSION}_x64-setup.exe`);
+  process.exit(1);
+}
+fs.copyFileSync(path.join(NSIS_DIR, src), path.join(OUT_DIR, NAME));
 
 console.log('版本  ', manifest.version);
+console.log('来源包', src);
 console.log('地址  ', manifest.platforms['windows-x86_64'].url);
 console.log('清单  ', path.join(OUT_DIR, 'latest.json'));
 console.log('安装包', path.join(OUT_DIR, NAME));
+
+// 收尾自查：清单里写的文件名，必须和实际复制出来的文件名一模一样。
+// 这两条对不上就是「点下载必 404」，而「检查更新」那一步完全看不出来 ——
+// 所以这行自查是必须的，不是锦上添花。
+if (!fs.existsSync(path.join(OUT_DIR, NAME))) {
+  console.error('复制后的安装包不存在');
+  process.exit(1);
+}
+if (!decodeURIComponent(manifest.platforms['windows-x86_64'].url).endsWith('/' + NAME)) {
+  console.error('清单里的文件名和实际文件名对不上');
+  process.exit(1);
+}
+console.log('自查  清单地址与实际文件名一致 ✔');
