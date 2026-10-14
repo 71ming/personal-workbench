@@ -870,6 +870,85 @@
   .ai-test-box dd { margin: 0; font-variant-numeric: tabular-nums; }
   .ai-test-box .ai-test-note { margin-top: 6px; font-size: 11px; opacity: .8; }
 
+
+  /* ==========================================================
+     v4 · 日历视图
+     ========================================================== */
+
+  /* 日历模式下侧栏整个让位：窄屏时 300px 的列表会把月历挤到没法看。
+     用 body 上的 class 控制，而不是给 #sidebar 加 hidden ——
+     syncListVisibility() 也在动那个元素的 hidden，两边一起改容易打架。 */
+  body.cal-mode #sidebar { display: none; }
+
+  #cal-pane {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; background: var(--surface);
+  }
+  #cal-head {
+    display: flex; align-items: center; gap: 10px;
+    height: 56px; padding: 0 16px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .cal-nav { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .cal-nav b { font-size: 14px; min-width: 92px; text-align: center; }
+  #cal-back { margin-left: auto; flex-shrink: 0; }
+
+  #cal-body { flex: 1; display: flex; min-height: 0; }
+  #cal-grid-wrap {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; padding: 12px 14px; gap: 4px;
+  }
+  #cal-weekhead, #cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  #cal-weekhead { flex-shrink: 0; }
+  #cal-weekhead span {
+    text-align: center; font-size: 11.5px; color: var(--text-mute); padding: 3px 0;
+  }
+  /* 固定 6 行：有的月份要 5 行、有�� 6 行，行高跟着内容跳会很晃。
+     格子用 min-height:0 + overflow:hidden，多余的圆点直接藏掉。 */
+  #cal-grid { flex: 1; grid-auto-rows: minmax(0, 1fr); min-height: 0; }
+
+  .cal-cell {
+    border: 1px solid var(--border-soft); border-radius: 6px;
+    background: var(--surface); cursor: pointer;
+    padding: 4px 5px; min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  }
+  .cal-cell:hover { background: var(--bg-soft, #f6f7f9); }
+  .cal-cell.out { opacity: .35; }               /* 不是本月的格子 */
+  .cal-cell.today .cal-day { color: var(--accent); font-weight: 700; }
+  .cal-cell.pick { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .cal-cell.overdue { background: #fdf3f3; border-color: #f3d2d4; }
+  .cal-day { font-size: 12px; color: var(--text-sub); line-height: 1.2; }
+  .cal-dots { display: flex; flex-wrap: wrap; gap: 3px; overflow: hidden; }
+  .cal-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .cal-dot.done { background: var(--line, #d8dbe0); }
+  .cal-dot.overdue { background: var(--danger); }
+
+  #cal-side {
+    width: 260px; flex-shrink: 0; overflow-y: auto; min-height: 0;
+    border-left: 1px solid var(--border-soft);
+  }
+  #cal-day-title { font-size: 12.5px; font-weight: 600; padding: 12px 14px 6px; }
+  .cal-side-title { font-size: 11.5px; color: var(--text-mute); padding: 16px 14px 6px; }
+  .cal-task {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 14px; cursor: pointer;
+  }
+  .cal-task:hover { background: var(--bg-soft, #f6f7f9); }
+  .cal-task .t { font-size: 13px; line-height: 1.5; word-break: break-word; }
+  .cal-task.done .t { text-decoration: line-through; color: var(--text-mute); }
+  .cal-empty { padding: 8px 14px; font-size: 12px; color: var(--text-mute); }
+
+  /* 窄屏：右边那一栏改成排在月历下面，不然 260px 会把 7 列挤成一条 */
+  @media (max-width: 760px) {
+    #cal-body { flex-direction: column; }
+    #cal-side {
+      width: auto; border-left: none;
+      border-top: 1px solid var(--border-soft); max-height: 45%;
+    }
+    #cal-head { padding: 0 10px; }
+    .cal-nav b { min-width: 76px; font-size: 13px; }
+  }
 </style>
 </head>
 <body>
@@ -953,6 +1032,8 @@
       <div class="sidebar-foot">
         <button id="new-note">＋ 新建笔记</button>
         <button id="new-task" class="hidden">＋ 新建任务</button>
+      <!-- v4：日历视图。放在侧栏底部常驻可见，而不是顶栏再加一个标签 -->
+      <button id="cal-toggle" class="hidden">📅 日历视图</button>
         <button id="new-bookmark" class="hidden">＋ 收藏链接</button>
         <div id="hints"></div>
       </div>
@@ -1018,6 +1099,34 @@
             <input id="task-due" type="date">
             <button class="btn-primary" id="task-toggle" style="margin-left:auto">标记完成</button>
           </div>
+        </div>
+      </div>
+    </section>
+    <!-- v4：日历视图。和 #task-pane 互斥，同属「任务」这个视图。 -->
+    <section id="cal-pane" class="hidden">
+      <div id="cal-head">
+        <div class="cal-nav">
+          <button class="btn" id="cal-prev" title="上个月">‹</button>
+          <b id="cal-label">—</b>
+          <button class="btn" id="cal-next" title="下个月">›</button>
+          <button class="btn" id="cal-today">今天</button>
+        </div>
+        <button class="btn" id="cal-back">✕ 返回列表</button>
+      </div>
+
+      <div id="cal-body">
+        <div id="cal-grid-wrap">
+          <div id="cal-weekhead">
+            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+          </div>
+          <div id="cal-grid"></div>
+        </div>
+
+        <div id="cal-side">
+          <div id="cal-day-title">选一天看看</div>
+          <div id="cal-day-list"></div>
+          <div class="cal-side-title">未安排 <span id="cal-und-count"></span></div>
+          <div id="cal-und-list"></div>
         </div>
       </div>
     </section>
@@ -1902,6 +2011,8 @@ async function loadTasks(keyword = searchEl.value.trim()) {
   hideBanner();
   syncListVisibility();
   renderTasks();
+  // 日历用的是同一份 tasks：改了完成状态或截止日期，它得跟着重画
+  if (calOpen) renderCal();
 }
 
 function taskItemHtml(t) {
@@ -1951,6 +2062,153 @@ setInterval(() => {
   // 只在真的看得见的时候刷。搜索模式下 .d 是绝对时间（搜索结果不显示时间），不用管。
   if (view === 'tasks' && !inSearchMode()) refreshTaskAgo();
 }, 60000);
+
+// ============ v4 · 日历视图（日历本体） ============
+// 为什么是任务视图里的一个模式，而不是顶栏新加一个标签：
+// 顶栏已经有 4 个标签，900px 以下要靠折叠菜单才放得下，再挤第 5 个会很难看；
+// 而且日历和列表就是同一批数据（tasks 数组），放一起切换最自然。
+//
+// 数据一个都不用另拿：后端 GET /api/tasks 已经返回全量，每条都带 due_date。
+let calOpen = false;                          // 日历模式是否打开
+let calY = new Date().getFullYear();          // 当前显示的年
+let calM = new Date().getMonth() + 1;         // 当前显示的月（1~12，跟人读的月份一致）
+let calPick = '';                              // 选中的那天，'YYYY-MM-DD'
+
+// 本地日期 → YYYY-MM-DD。不能用 toISOString()：那个是 UTC，
+// 东八区晚上 8 点以后会算成「明天」，日历上就莫名其妙多一天。
+function calYmd(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function setCalOpen(on) {
+  calOpen = !!on && view === 'tasks';
+  document.body.classList.toggle('cal-mode', calOpen);
+  $('cal-pane').classList.toggle('hidden', !calOpen);
+  // task-pane 要重算一遍：从日历退回列表时它是该露出来的。
+  // 只写 !calOpen 的话，在「不在任务视图」时会把它错误地显示出来。
+  $('task-pane').classList.toggle('hidden', view !== 'tasks' || calOpen);
+  $('cal-toggle').textContent = calOpen ? '☰ 返回列表' : '📅 日历视图';
+  if (calOpen) {
+    if (!calPick) calPick = calYmd(new Date());
+    renderCal();
+  }
+}
+
+// 把任务按截止日期分堆。没定日期的单独拎出来 ——
+// 它们没有格子可放，硬塞进某一天就是骗人。
+function calBucket() {
+  const byDay = {};
+  const und = [];
+  for (const t of tasks) {
+    if (!t.due_date) { und.push(t); continue; }
+    (byDay[t.due_date] || (byDay[t.due_date] = [])).push(t);
+  }
+  return { byDay, und };
+}
+
+function calTaskHtml(t) {
+  const done = t.status === 'done';
+  return `<div class="cal-task ${done ? 'done' : ''}" data-task="${t.id}">`
+    + `<button class="check ${done ? 'on' : ''}" data-toggle="${t.id}"
+            title="${done ? '恢复为待办' : '标记完成'}"></button>`
+    + `<span class="t">${esc(listTitle(t.title))}</span>`
+    + `</div>`;
+}
+
+function renderCal() {
+  if (!calOpen) return;
+  $('cal-label').textContent = `${calY}年${calM}月`;
+
+  const { byDay, und } = calBucket();
+  const today = calYmd(new Date());
+
+  // 本月 1 号前面要补几个空格。
+  // 日历从**周一**开始排，而 Date.getDay() 的 0 是周日，所以要 +6 再 %7 换算。
+  const lead = (new Date(calY, calM - 1, 1).getDay() + 6) % 7;
+
+  let cells = '';
+  for (let i = 0; i < 42; i++) {          // 固定 6 行，格子行高才不会忽高忽低
+    const d = new Date(calY, calM - 1, 1 - lead + i);
+    const key = calYmd(d);
+    const list = byDay[key] || [];
+    // 只有「还没做完」的才谈得上逾期：昨天做完的事今天标红是错的
+    const overdue = key < today && list.some((t) => t.status !== 'done');
+    const cls = ['cal-cell',
+      d.getMonth() !== calM - 1 ? 'out' : '',
+      key === today ? 'today' : '',
+      key === calPick ? 'pick' : '',
+      overdue ? 'overdue' : '',
+    ].filter(Boolean).join(' ');
+    // 一格最多 6 个点。再多也放不下，CSS 里 overflow:hidden 会裁掉
+    const dots = list.slice(0, 6).map((t) => {
+      const c = t.status === 'done' ? 'done' : (key < today ? 'overdue' : '');
+      return `<i class="cal-dot ${c}"></i>`;
+    }).join('');
+    cells += `<div class="${cls}" data-date="${key}">`
+      + `<span class="cal-day">${d.getDate()}</span>`
+      + `<span class="cal-dots">${dots}</span></div>`;
+  }
+  $('cal-grid').innerHTML = cells;
+
+  // ---- 右边：选中那一天 ----
+  const day = byDay[calPick] || [];
+  const dt = new Date(calPick + 'T00:00:00');
+  const wd = ['日', '一', '二', '三', '四', '五', '六'][dt.getDay()];
+  $('cal-day-title').textContent =
+    `${calPick === today ? '今天 · ' : ''}${dt.getMonth() + 1}月${dt.getDate()}日 周${wd}`
+    + (day.length ? `　${day.length} 条` : '');
+  $('cal-day-list').innerHTML = day.length
+    ? day.map(calTaskHtml).join('')
+    : `<div class="cal-empty">这天没有任务。</div>`;
+
+  $('cal-und-count').textContent = und.length ? `${und.length}` : '';
+  $('cal-und-list').innerHTML = und.length
+    ? und.map(calTaskHtml).join('')
+    : `<div class="cal-empty">所有任务都定好了日子。</div>`;
+}
+
+// ---- 日历的按钮 ----
+$('cal-toggle').addEventListener('click', () => setCalOpen(!calOpen));
+$('cal-back').addEventListener('click', () => setCalOpen(false));
+
+// 翻月。月份是从 1 数到 12 的（不是 0~11），所以跨年要自己处理。
+function calShiftMonth(step) {
+  calM += step;
+  if (calM < 1) { calM = 12; calY--; }
+  if (calM > 12) { calM = 1; calY++; }
+  renderCal();
+}
+$('cal-prev').addEventListener('click', () => calShiftMonth(-1));
+$('cal-next').addEventListener('click', () => calShiftMonth(1));
+
+  $('cal-today').addEventListener('click', () => {
+  const now = new Date();
+  calY = now.getFullYear();
+  calM = now.getMonth() + 1;
+  calPick = calYmd(now);
+  renderCal();
+});
+
+// 点格子选一天
+$('cal-grid').addEventListener('click', (e) => {
+  const cell = e.target.closest('[data-date]');
+  if (!cell) return;
+  calPick = cell.dataset.date;
+  renderCal();
+});
+
+// 右边两栏的任务：勾选框切换完成状态，其它地方点开这条任务。
+// 复用列表那边现成的 toggleTask() 和 openTask()，不另写一套保存逻辑。
+$('cal-pane').addEventListener('click', (e) => {
+  const chk = e.target.closest('.check');
+  if (chk) { e.stopPropagation(); toggleTask(Number(chk.dataset.toggle)); return; }
+  const row = e.target.closest('[data-task]');
+  if (!row) return;
+  // 编辑器在 #task-pane 里、被日历盖住了 —— 先退回列表模式再打开
+  setCalOpen(false);
+  openTask(Number(row.dataset.task));
+});
 
 function setTaskSaveState(state, text) {
   taskStateEl.classList.remove('saving', 'saved');
@@ -2576,6 +2834,8 @@ function syncListVisibility() {
   $('ask-list').classList.toggle('hidden', searching || view !== 'ask');
   $('new-note').classList.toggle('hidden', searching || view !== 'notes');
   $('new-task').classList.toggle('hidden', searching || view !== 'tasks');
+  // 日历视图的入口按钮，同样只在任务视图里露出来
+  $('cal-toggle').classList.toggle('hidden', searching || view !== 'tasks');
   $('new-bookmark').classList.toggle('hidden', searching || view !== 'bookmarks');
 }
 
@@ -2743,6 +3003,9 @@ async function setView(v) {
       b.classList.toggle('on', b.dataset.view === v));
     $('editor').classList.toggle('hidden', v !== 'notes');
     $('task-pane').classList.toggle('hidden', v !== 'tasks');
+    // 离开「任务」就顺手关掉日历：日历只属于这个视图，
+    // 不关的话切到笔记视图会看到一个还亮着的日历面板。
+    if (v !== 'tasks') setCalOpen(false);
     $('bookmark-pane').classList.toggle('hidden', v !== 'bookmarks');
     $('ask-pane').classList.toggle('hidden', v !== 'ask');
     searchEl.placeholder =
@@ -2835,6 +3098,8 @@ document.addEventListener('keydown', (e) => {
   // Esc 按「最紧急 → 最不紧急」的顺序一层层退，避免一下全关了
   if (e.key === 'Escape') {
     if (menuIsOpen()) { setMenuOpen(false); return; }   // 菜单开着就先关菜单
+    if (calOpen) { setCalOpen(false); return; }   // 日历是最上面那层，先关它
+    // （顺序不能反：菜单开着时先关菜单）
     if (bookmarkConfirmArmed) { bookmarkDisarmDelete(); return; }
     if (taskConfirmArmed) { taskDisarmDelete(); return; }
     if (confirmArmed) { disarmDelete(); return; }
