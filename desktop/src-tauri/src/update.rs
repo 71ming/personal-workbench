@@ -243,7 +243,7 @@ mod tests {
     fn 版本号跟得上编译期那个() {
         // 编译进 exe 的版本必须和 tauri.conf.json 里写的一致，
         // 不一致的话界面会显示一个跟更新清单对不上的版本号。
-        assert_eq!(current_version(), "0.6.0");
+        assert_eq!(current_version(), "0.6.1");
     }
 
     #[test]

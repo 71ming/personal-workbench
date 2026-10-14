@@ -10,7 +10,7 @@
 
 [package]
 name = "workbench"
-version = "0.6.0"
+version = "0.6.1"
 description = "个人工作台"
 authors = ["you"]
 edition = "2021"

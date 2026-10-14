@@ -902,6 +902,11 @@
     display: flex; align-items: center; gap: 8px;
     margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--line);
   }
+  /* AI 弹窗底部有个占位消息（.ai-foot-msg 有 flex:1）把按钮顶到右边；
+     检查更新弹窗底下没有消息，按钮就贴到左边去了，看着像没对齐。
+     这个类专门给「底部只有按钮」的弹窗用。 */
+  .ai-foot.buttons-right { justify-content: flex-end; }
+  }
   .ai-foot .ai-foot-msg { font-size: 12px; color: var(--text-mute); flex: 1; }
   .ai-foot .ai-foot-msg.ok { color: var(--ok, #177245); }
   .ai-foot .ai-foot-msg.err { color: var(--danger); }
@@ -1429,7 +1434,7 @@
 
     <div id="update-body"><p class="upd-line">正在检查…</p></div>
 
-    <div class="ai-foot">
+    <div class="ai-foot buttons-right">
       <button class="btn" id="update-close">关闭</button>
       <button class="btn-primary" id="update-install">下载并安装</button>
     </div>
