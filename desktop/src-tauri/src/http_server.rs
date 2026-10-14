@@ -359,6 +359,82 @@ fn route(
         }
     }
 
+    // ============ 收藏 ============
+    // 跟任务一样是独立一张表。这里多一条硬规矩：链接必须是合法的 http/https 才收。
+    //
+    // 本阶段（1b）只做「存和管链接」，**网页抓取留到 1c** ——
+    // 所以 POST /api/bookmarks/:id/fetch 和 DELETE /api/bookmarks/:id/fetch
+    // 这两个接口还不存在，调用会走到末尾的 404（跟「接口还没做」的表现一致）。
+    if seg[0] == "bookmarks" {
+        match seg.len() {
+            // GET /api/bookmarks?search=关键词
+            1 if *method == Method::Get => {
+                let conn = db::open(db_path)?;
+                let kw = query.get("search").map(|s| s.as_str());
+                let rows = db::list_bookmarks(&conn, kw)?;
+                return Ok(json_response(200, &Value::Array(rows)));
+            }
+            // POST /api/bookmarks
+            1 if *method == Method::Post => {
+                let conn = db::open(db_path)?;
+                let payload = read_json(body)?;
+                let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                return match db::create_bookmark(&conn, url, title)? {
+                    Some(bm) => Ok(json_response(200, &bm)),
+                    // 链接不合法就别入库。这条收藏本身也没意义，留个空壳更难删。
+                    None => Ok(json_response(
+                        400,
+                        &json!({ "error": "需要一个 http:// 或 https:// 开头的链接" }),
+                    )),
+                };
+            }
+            2..=3 => {
+                // id 不是数字 → 400（跟 server.js 一致）。
+                let id: i64 = match seg[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => return Ok(json_response(400, &json!({ "error": "bad id" }))),
+                };
+                let conn = db::open(db_path)?;
+
+                if seg.len() == 3 && seg[2] == "restore" && *method == Method::Post {
+                    return match db::restore_bookmark(&conn, id)? {
+                        Some(bm) => Ok(json_response(200, &bm)),
+                        None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                    };
+                }
+
+                if seg.len() != 2 {
+                    return Ok(json_response(404, &json!({ "error": "no such endpoint" })));
+                }
+
+                match *method {
+                    Method::Get => {
+                        return match db::get_bookmark(&conn, id)? {
+                            Some(bm) => Ok(json_response(200, &bm)),
+                            None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                        }
+                    }
+                    Method::Put => {
+                        let payload = read_json(body)?;
+                        let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                        let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        return match db::update_bookmark(&conn, id, url, title)? {
+                            Some(bm) => Ok(json_response(200, &bm)),
+                            None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                        };
+                    }
+                    Method::Delete => {
+                        db::soft_delete_bookmark(&conn, id)?;
+                        return Ok(json_response(200, &json!({ "ok": true })));
+                    }
+                    _ => return Ok(json_response(404, &json!({ "error": "no such endpoint" }))),
+                }
+            }
+            _ => return Ok(json_response(404, &json!({ "error": "no such endpoint" }))),
+        }
+    }
+
     // /api/search?q=关键词 —— 一次返回所有类型。
     // 「哪些东西能被搜到」这个决定收在后端这一处：
     // 加了新类型，这里加一段查询、返回里加一个 key，前端只管渲染。
@@ -367,26 +443,19 @@ fn route(
         let keyword = query.get("q").cloned().unwrap_or_default();
         let notes = db::list_notes(&conn, Some(&keyword))?;
         let tasks = db::list_tasks(&conn, Some(&keyword))?;
+        let bookmarks = db::list_bookmarks(&conn, Some(&keyword))?;
         return Ok(json_response(
             200,
             &json!({
                 "keyword": keyword,
                 "notes": notes,
                 "tasks": tasks,
-                // 收藏还没平移，这里先空着；平移之后这里会变成真查询。
-                // key 必须留着 —— 前端直接读 data.bookmarks，缺了会报错。
-                "bookmarks": [],
+                "bookmarks": bookmarks,
             }),
         ));
     }
 
-    // 阶段 0 的占位：收藏返回空数组，等下个阶段平移。
-    // （任务已经平移完了 —— 见上面那个 seg[0] == "tasks" 分支）
-    if seg[0] == "bookmarks" && seg.len() == 1 && *method == Method::Get {
-        return Ok(json_response(200, &json!([])));
-    }
-
-    // 导出：阶段 0 只导出笔记。
+    // 导出：笔记 + 任务 + 收藏。
     if seg[0] == "export" && seg.len() == 1 && *method == Method::Get {
         let conn = db::open(db_path)?;
         let md = db::export_markdown(&conn)?;

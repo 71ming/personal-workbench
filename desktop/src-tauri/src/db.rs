@@ -149,12 +149,16 @@ fn title_or(title: &str, fallback: &str) -> String {
 /// 前端传什么都得有这一道闸。格式不对就当没填，不报错。
 fn norm_due(v: &str) -> Option<String> {
     let s = v.trim();
-    let ok = s.len() == 10
-        && s.as_bytes().get(4) == Some(&b'-')
-        && s.as_bytes().get(7) == Some(&b'-')
-        && s[..4].bytes().all(|c| c.is_ascii_digit())
-        && s[5..7].bytes().all(|c| c.is_ascii_digit())
-        && s[8..10].bytes().all(|c| c.is_ascii_digit());
+    let b = s.as_bytes();
+    // 全程用 bytes 判断，不切字符串：只要 4、7 两个位置确实是 ASCII 短横，
+    // 那么 0..4 / 5..7 / 8..10 这几个切点就必然落在字符边界上。
+    // （Rust 的 len() 数的是字节，直接 `s.len() == 10` 挡不住中文串）
+    let ok = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..10].iter().all(|c| c.is_ascii_digit());
     if ok {
         Some(s.to_string())
     } else {
@@ -401,7 +405,88 @@ pub fn export_markdown(conn: &Connection) -> Result<String, String> {
         }
     }
 
+    // ---- 收藏 ----
+    //
+    // 最朴素的 `- [标题](链接)`，任何编辑器点得开。
+    // URL 存进来之前已经被 norm_url 验过是 http/https 了，这里不用再担心协议。
+    //
+    // 标题这一格有个坑要处理：建收藏时标题留空，后端会拿链接本身当标题兜底，
+    // 于是导出来变成 `- [<189 字的网址>](<189 字的网址>)`，一屏放不下半行。
+    // 所以复用 is_auto_title()：标题是「我们自己按链接拼出来的」就用推导标题顶上，
+    // 用户自己起的一个字都不动。
+    //
+    // **链接本身永远不截断** —— 截了就点不开了，那一行长就长着。
+    let mut stmt = conn
+        .prepare(
+            "SELECT url,title,summary,fetched_at,fetch_error FROM bookmarks
+             WHERE deleted_at IS NULL ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let bm_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut marks: Vec<(String, String, String, Option<String>, Option<String>)> = Vec::new();
+    for r in bm_rows {
+        marks.push(r.map_err(|e| e.to_string())?);
+    }
+
+    if !marks.is_empty() {
+        out.push_str("\n# 收藏\n\n");
+        for (url, title, summary, fetched_at, fetch_error) in &marks {
+            let raw = title.trim();
+            let shown = if raw.is_empty() || is_auto_title(raw, url) {
+                let derived = title_from_url(url);
+                if derived.is_empty() { url.clone() } else { derived }
+            } else {
+                raw.to_string()
+            };
+            out.push_str(&format!("- [{}]({})\n", flatten_ws(&shown), url));
+            if !summary.is_empty() {
+                out.push_str(&format!("  > {}\n", flatten_ws(summary)));
+            }
+            // 抓取状态也写进备份。**抓成功的不写** —— 那是默认状态，每条都写一遍全是噪音。
+            // 但「没抓到」和「还没抓」必须写：这份文件是唯一的备份，
+            // 看不出来的话过一个月回看会以为那几个网页本来就没内容，白重抓一遍。
+            if let Some(err) = fetch_error.as_deref().filter(|s| !s.trim().is_empty()) {
+                out.push_str(&format!("  > 没抓到内容：{}\n", flatten_ws(err)));
+            } else if fetched_at.is_none() {
+                out.push_str("  > 还没抓取内容\n");
+            }
+        }
+    }
+
     Ok(out)
+}
+
+/// 换行和它周围的空白压成一个空格。
+///
+/// Markdown 的链接文字里如果有换行，渲染出来会断成两行甚至失效。
+/// server.js 用 `replace(/\s*\n\s*/g, ' ')`，这里做成一样的效果。
+fn flatten_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch == '\n' {
+            pending_space = true;
+        } else if ch.is_whitespace() {
+            if pending_space { out.push(' '); pending_space = false; }
+            out.push(ch);
+        } else {
+            if pending_space { out.push(' '); pending_space = false; }
+            out.push(ch);
+        }
+    }
+    if pending_space { out.push(' '); }
+    out
 }
 
 /// `2026-10-15` → `10月15日`。
@@ -409,7 +494,12 @@ pub fn export_markdown(conn: &Connection) -> Result<String, String> {
 /// 导出是给人读的，写 `2026-10-15截止` 也认得出来，但中文格式短得多，
 /// 一行放得下。年份就不带了 —— 备份里的东西基本都是今年的。
 fn format_due_cn(d: &str) -> String {
-    if d.len() != 10 {
+    // 用 bytes 判断，别用 d.len() != 10 就直接切 ——
+    // Rust 的 len() 数的是**字节**不是字符，一个恰好 10 字节的中文串
+    // （比如 3 个汉字加 1 个字符）会通过这个检查，然后在 &d[5..7] 处 panic。
+    // 只在「位置 4 和 7 确实是 ASCII 短横」时才切，切的点必然是字符边界。
+    let b = d.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return d.to_string();
     }
     let m = &d[5..7];
@@ -569,4 +659,274 @@ pub fn restore_task(conn: &Connection, id: i64) -> Result<Option<Value>, String>
     conn.execute("UPDATE tasks SET deleted_at=NULL WHERE id=?1", [id])
         .map_err(|e| format!("撤销失败：{}", e))?;
     get_task(conn, id)
+}
+
+
+// ============================================================================
+// 收藏
+// ============================================================================
+//
+// 继续守「一张表一个概念」。收藏存的是「一个链接 + 我对它的称呼」，
+// 不是笔记也不是任务，不跟它们混在一起。
+//
+// 本阶段（1b）只做「存和管链接」，**网页抓取留到 1c**。
+// 但 content / summary / fetched_at / fetch_error 这四个字段照样建好、照样返回，
+// 因为前端就是按这套字段名渲染的 —— 现在它们恒为空，抓取功能一开就有值了，
+// 前端一行都不用改。
+
+/// 剥掉 `http://` / `https://` 前缀，返回 `None` 表示「不是 http(s) 链接」。
+///
+/// 抽出来是因为这个下标计算**写错过两次**：
+///
+/// 1. `http://` 是 7 个字符、`https://` 是 8 个，拿同一个下标去切两边，
+///    结果 https 的链接会被当成「冒号后面是空的」而全部拒掉。
+/// 2. 直接写 `&t[..7]` 会在**中文字符中间**切开字符串，Rust 直接 panic
+///    （`byte index 7 is not a char boundary`）。
+///    导出时拿用户自己起的标题去做这个比对，一个中文标题就让整个导出 500。
+///
+/// 教训：Rust 的字符串是 UTF-8，**切之前必须确认那个位置是字符边界**。
+/// 这里用「前 8 个字节全是 ASCII」来保证 —— 协议头本身必然是 ASCII，
+/// 不可能是多字节字符的前缀字节。
+fn strip_scheme(s: &str) -> Option<&str> {
+    let t = s.trim();
+    let b = t.as_bytes();
+    if b.len() > 7 && b[..7].eq_ignore_ascii_case(b"http://") {
+        Some(&t[7..])
+    } else if b.len() > 8 && b[..8].eq_ignore_ascii_case(b"https://") {
+        Some(&t[8..])
+    } else {
+        None
+    }
+}
+
+/// 链接归一化：**只放行 http / https**，其它一律拒绝（返回 `None`）。
+///
+/// 这不是洁癖：前端会把收藏的链接渲染成可点的 `<a>`。
+/// 如果放行 `javascript:alert(1)`，用户在列表里点一下，
+/// 脚本就在他自己工作台的页面上下文里执行了 ——
+/// 存进来的是个数据，读出来却成了代码执行。
+///
+/// 规则跟 server.js 的 `normUrl()` 一致：先看前缀，再检查域名不空。
+pub fn norm_url(v: &str) -> Option<String> {
+    let s = v.trim();
+    let after_scheme = match strip_scheme(s) {
+        Some(r) => r,
+        None => return None,
+    };
+    // 冒号后面至少还得有域名。光秃秃的 `http://` 或 `http:///path` 都不是合法链接。
+    if after_scheme.is_empty() || after_scheme.starts_with('/') {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// 从网址里推出一个能看的标题。纯字符串处理，不发任何请求。
+///
+/// 跟 server.js 的 `titleFromUrl()` 是同一套逻辑，两边各留一份：
+/// 后端这份是导出时兜底 —— 标题为空时直接写进 Markdown 会变成
+/// `- [](https://…)`，那是**语法错误的链接**，在任何编辑器里都渲染不出来，
+/// 等于这条收藏在备份里丢了。
+pub fn title_from_url(raw: &str) -> String {
+    let rest = match strip_scheme(raw) {
+        Some(r) => r,
+        None => return String::new(),
+    };
+
+    // 拆出域名（到第一个 / ? # 为止）
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = strip_www(&rest[..host_end]);
+    let after_host = &rest[host_end..];
+
+    // 取路径末段（到 ? # 为止）
+    let path = after_host.split(['?', '#']).next().unwrap_or("");
+    let last_seg = path.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
+
+    let tail = last_seg.replace(['-', '_'], " ").trim().to_string();
+    if !host.is_empty() && !tail.is_empty() {
+        return format!("{} · {}", tail, host);
+    }
+    host
+}
+
+fn strip_www(h: &str) -> String {
+    // 大小写不敏感地去掉 www. 前缀，跟 JS 的 /^www\./i 保持一致。
+    // 用 bytes 比而不是 h[..4] —— 中文域名（IDN 未转码时）在 h[..4] 上会 panic。
+    let b = h.as_bytes();
+    if b.len() > 4 && b[..4].eq_ignore_ascii_case(b"www.") {
+        h[4..].to_string()
+    } else {
+        h.to_string()
+    }
+}
+
+/// 判断一个标题是不是「我们自己按网址拼出来的那个自动标题」。
+///
+/// 只有这种标题才允许被替换（将来抓回来的网页真标题，或者导出时的兜底），
+/// **用户自己起的名字一个字都不能动**。
+pub fn is_auto_title(title: &str, url: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let rest = match strip_scheme(url) {
+        Some(r) => r,
+        None => return false,
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = strip_www(&rest[..host_end]);
+
+    if t == host || t.ends_with(&format!(" · {}", host)) {
+        return true;
+    }
+    // 还有一种「自动」情况：标题整个就是链接本身。
+    // 新建时如果没填标题，后端会用链接兜底当标题显示，这种也算自动生成的。
+    bare(t) == bare(url)
+}
+
+/// 去掉协议头和末尾斜杠，用来比对「标题是不是就是链接」。
+fn bare(s: &str) -> String {
+    let rest = strip_scheme(s).unwrap_or_else(|| s.trim());
+    rest.trim_end_matches('/').to_string()
+}
+
+/// 收藏行 → JSON。
+///
+/// 字段顺序跟 server.js 的 `SELECT *` 一致。少一个字段前端就可能读不到，
+/// 所以这里老老实实全部返回（包括 1c 才用得上的抓取字段）。
+fn bookmark_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id":          row.get::<_, i64>(0)?,
+        "url":         row.get::<_, String>(1)?,
+        "title":       row.get::<_, String>(2)?,
+        "created_at":  row.get::<_, String>(3)?,
+        "updated_at":  row.get::<_, String>(4)?,
+        "deleted_at":  row.get::<_, Option<String>>(5)?,
+        "content":     row.get::<_, String>(6)?,
+        "summary":     row.get::<_, String>(7)?,
+        "fetched_at":  row.get::<_, Option<String>>(8)?,
+        "fetch_error": row.get::<_, Option<String>>(9)?,
+    }))
+}
+
+pub fn list_bookmarks(conn: &Connection, search: Option<&str>) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    match search {
+        Some(kw) if !kw.is_empty() => {
+            // 收藏**四样都搜**：标题、链接、正文、摘要 ——
+            // 有时你只记得「那篇文章里写过什么」，想不起标题也记不清在哪个站。
+            let pattern = format!("%{}%", kw);
+            let mut stmt = conn
+                .prepare(
+                    "SELECT * FROM bookmarks WHERE deleted_at IS NULL \
+                     AND (title LIKE ?1 OR url LIKE ?1 OR content LIKE ?1 OR summary LIKE ?1) \
+                     ORDER BY updated_at DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&pattern], bookmark_row).map_err(|e| e.to_string())?;
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+        }
+        _ => {
+            let mut stmt = conn
+                .prepare("SELECT * FROM bookmarks WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], bookmark_row).map_err(|e| e.to_string())?;
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn get_bookmark(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM bookmarks WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([id], bookmark_row).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out.into_iter().next())
+}
+
+/// 新建收藏。链接不合法返回 `None`，由路由层转成 400。
+///
+/// 标题留空时**用链接本身兜底**，跟 server.js 一致（`title.trim() || u`）。
+/// 前端列表上直接显示这个字段，不兜底的话会出现一条空白项。
+pub fn create_bookmark(conn: &Connection, url: &str, title: &str) -> Result<Option<Value>, String> {
+    let u = match norm_url(url) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    conn.execute(
+        "INSERT INTO bookmarks (url,title) VALUES (?1,?2)",
+        rusqlite::params![u, title_or(title, &u)],
+    )
+    .map_err(|e| format!("新建收藏失败：{}", e))?;
+    let id = conn.last_insert_rowid();
+    get_bookmark(conn, id)
+}
+
+/// 更新。链接和标题一起存。
+///
+/// 两个细节照搬 server.js：
+/// 1. **链接改坏了保留原来的**（`normUrl(url) || cur.url`）——
+///    自动保存是逐字符触发的，用户正打着「https://」中间存一次很正常，
+///    要是照单全收就把收藏弄废了。
+/// 2. **链接变了就把正文/摘要清掉** —— 否则会出现「链接是 A、内容是 B」，
+///    是最难自己发现的一类错数据。
+pub fn update_bookmark(
+    conn: &Connection,
+    id: i64,
+    url: &str,
+    title: &str,
+) -> Result<Option<Value>, String> {
+    let cur = match get_bookmark(conn, id)? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    // 已经软删的不能改（server.js 是 `if (!cur || cur.deleted_at) 404`）
+    if !cur.get("deleted_at").map_or(true, |v| v.is_null()) {
+        return Ok(None);
+    }
+    let old_url = cur.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let u = norm_url(url).unwrap_or_else(|| old_url.to_string());
+
+    let changed = conn
+        .execute(
+            "UPDATE bookmarks SET url=?1, title=?2,
+                    content   = CASE WHEN url<>?1 THEN ''   ELSE content   END,
+                    summary   = CASE WHEN url<>?1 THEN ''   ELSE summary   END,
+                    fetched_at= CASE WHEN url<>?1 THEN NULL ELSE fetched_at END,
+                    fetch_error=CASE WHEN url<>?1 THEN NULL ELSE fetch_error END,
+                    updated_at=datetime('now','localtime')
+             WHERE id=?3 AND deleted_at IS NULL",
+            rusqlite::params![u, title_or(title, &u), id],
+        )
+        .map_err(|e| format!("保存收藏失败：{}", e))?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+    get_bookmark(conn, id)
+}
+
+pub fn soft_delete_bookmark(conn: &Connection, id: i64) -> Result<bool, String> {
+    let n = conn
+        .execute(
+            "UPDATE bookmarks SET deleted_at=datetime('now','localtime')
+             WHERE id=?1 AND deleted_at IS NULL",
+            [id],
+        )
+        .map_err(|e| format!("删除收藏失败：{}", e))?;
+    Ok(n > 0)
+}
+
+pub fn restore_bookmark(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
+    conn.execute("UPDATE bookmarks SET deleted_at=NULL WHERE id=?1", [id])
+        .map_err(|e| format!("撤销失败：{}", e))?;
+    get_bookmark(conn, id)
 }
