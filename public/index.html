@@ -103,15 +103,15 @@
      原来这条只写在 #export-btn 上，v3 加 AI 按钮时没吃到样式，
      结果按钮塌成一条竖着的窄片（文字被挤到换行）—— 一眼就看得出来是外挂上去的。
      共用 class 之后，以后再加第三个头部按钮也不会再犯同样的错。 */
-  #import-btn, #export-btn, #ai-btn, #ask-btn {
+  #guide-btn, #import-btn, #export-btn, #ai-btn, #ask-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 7px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
     color: var(--text-sub); background: var(--surface); white-space: nowrap;
     border: 1px solid var(--border); border-radius: var(--radius);
     transition: all .15s;
   }
-  #import-btn:hover, #export-btn:hover, #ai-btn:hover, #ask-btn:hover { background: #f4f5f7; color: var(--text); }
-  #import-btn svg, #export-btn svg, #ai-btn svg, #ask-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  #guide-btn:hover, #import-btn:hover, #export-btn:hover, #ai-btn:hover, #ask-btn:hover { background: #f4f5f7; color: var(--text); }
+  #guide-btn svg, #export-btn svg, #ai-btn svg, #ask-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
   /* ==========================================================
      v4 · 顶栏窄屏折叠
@@ -169,7 +169,7 @@
     #head-actions.open { display: flex; }
 
     /* 竖排菜单里的按钮：撑满一整行，图标和文字靠左，读起来才像一份菜单 */
-    #ask-btn, #ai-btn, #import-btn, #export-btn {
+    #ask-btn, #ai-btn, #guide-btn, #import-btn, #export-btn {
       width: 100%; justify-content: flex-start; padding: 9px 12px;
     }
 
@@ -808,10 +808,40 @@
   .pick-item.on { background: #eef4fe; }
 
   /* ==========================================================
+     首次启动引导
+     ------------------------------------------------------------
+     卡片用两列网格而不是一列：四个功能一句话就能说完，
+     一列排下来要滚屏，用户还没看到「开始使用」就关掉了。
+     窄屏（下面那个 @media）自动退回一列。 */
+  .guide-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    margin: 16px 0 4px;
+  }
+  .guide-card {
+    padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: var(--radius);
+    background: #fbfcfd;
+  }
+  .guide-card h3 { font-size: 14px; margin: 0 0 4px; display: flex; align-items: center; gap: 6px; }
+  .guide-card h3 svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+  .guide-card p { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--text-sub); }
+  .guide-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .guide-acts button { flex: 1 1 200px; }
+  .guide-foot { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+  .guide-foot .guide-tip { flex: 1; font-size: 12px; color: var(--text-mute); }
+  .guide-foot button { flex-shrink: 0; }
+  @media (max-width: 640px) {
+    .guide-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ==========================================================
      v3 · AI 设置弹窗
      ========================================================== */
   .ai-backdrop {
-    position: fixed; inset: 0; z-index: 60;
+    /* z-index 80：要压过窄屏抽屉（#sidebar 是 70）。
+       原来这里是 60，正好比抽屉低一层 —— 窄屏下首次启动引导一弹出来，
+       左半边就被抽屉盖住了（看起来像弹窗错位，其实是两层盖错了）。
+       顺带把 AI 设置弹窗也一起修好了：它有同样的毛病。 */
+    position: fixed; inset: 0; z-index: 80;
     background: rgba(15,20,28,.38);
     display: flex; align-items: center; justify-content: center; padding: 24px;
   }
@@ -1047,6 +1077,16 @@
     </div>
     <!-- v4：窄屏时这三个不常用的按钮收进下面的折叠菜单（宽屏仍然并排显示） -->
     <div class="head-actions" id="head-actions">
+      <!-- 使用指引：引导只自动弹一次，但随时能再打开。
+           放在第一个，是因为「不知道这软件能干什么」的时候该点的就是它。 -->
+      <button id="guide-btn" title="看看这个工作台能做什么">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M9.2 9.2a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.2-2.8 3.8"/>
+          <path d="M12 17.5v.01"/>
+        </svg>
+        使用指引
+      </button>
       <!-- v3：问 AI。第 1、2 步已上线（设置 + 调用器），这一步加了面板。 -->
       <button id="ask-btn" title="勾几条笔记，问 AI 一个问题">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1307,6 +1347,58 @@
 <div id="toast" class="hidden">
   <span id="toast-msg"></span>
   <button id="toast-undo">撤销</button>
+</div>
+
+<!-- 首次启动引导。默认隐藏，判定「这是新用户」之后才弹（见文件末尾的 openGuideIfFirstRun） -->
+<div id="guide-backdrop" class="ai-backdrop hidden">
+  <div class="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+    <h2 id="guide-title">欢迎使用个人工作台</h2>
+    <p class="ai-sub">
+      笔记、任务、收藏、问 AI，四件事一个窗口做完。数据只存在你这台电脑上，不上传、不同步。
+    </p>
+
+    <div class="guide-grid">
+      <div class="guide-card">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>
+        </svg>笔记</h3>
+        <p>边写边自动保存。支持 Markdown，能在编辑、分栏、预览三种看法之间切换。</p>
+      </div>
+      <div class="guide-card">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h10M4 12h10M4 17h6"/><path d="m16 15 2 2 3-3.5"/>
+        </svg>任务</h3>
+        <p>记一件要做的事，可以设截止日期。逾期的会自己标红，完成的勾一下就行。</p>
+      </div>
+      <div class="guide-card">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/>
+          <path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/>
+        </svg>收藏</h3>
+        <p>把网址存进来，标题和正文会自动抓回来。抓不到也能存，只是显示「没抓到内容」。</p>
+      </div>
+      <div class="guide-card">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          <path d="M9.5 9.5a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.2-2.8 3.8"/>
+        </svg>问 AI</h3>
+        <p>勾几条笔记问一个问题，回答里带引用、点得回原文。<b>要自己填一个 API 密钥</b>，不填也能用别的。</p>
+      </div>
+    </div>
+
+    <div class="guide-acts">
+      <button class="btn" id="guide-import">导入别处的数据</button>
+      <button class="btn" id="guide-ai">设置 AI</button>
+    </div>
+    <div class="guide-foot">
+      <span class="guide-tip">随时可以点顶栏的「使用指引」再看一遍 · Ctrl+K 搜索 · Ctrl+S 立刻保存</span>
+      <button class="btn-primary" id="guide-close">开始使用</button>
+    </div>
+  </div>
 </div>
 
 <!-- v3：AI 设置弹窗。默认不渲染内容，打开时才填（避免每次开页面都去请求一次配置） -->
@@ -3944,8 +4036,67 @@ $('ai-reset').addEventListener('click', async () => {
 
 // Esc 优先关弹窗：它是当前最上层的东西
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('ai-backdrop').classList.contains('hidden')) closeAiDialog();
+  // 引导在最上层，先关它。
+  // **顺手补上 stopPropagation()**：以前按 Esc 关掉 AI 弹窗之后，
+  // 事件还会继续往下走，把正文编辑区也一起关了（连按两下 Esc 等于「关弹窗 + 退出一层」，
+  // 跟提示里写的「Esc 逐层退出」对不上）。这里一并修掉。
+  if (e.key === 'Escape' && !$('guide-backdrop').classList.contains('hidden')) {
+    closeGuide();
+    e.stopPropagation();
+    return;
+  }
+  if (e.key === 'Escape' && !$('ai-backdrop').classList.contains('hidden')) {
+    closeAiDialog();
+    e.stopPropagation();
+  }
 }, true);   // capture：要在页面自己那个 Esc 处理之前跑
+
+// ============ 首次启动引导 ============
+// 看过没有记在 localStorage 里。端口固定 8787（见 http_server.rs 顶部），
+// origin 稳定，所以这个标记跟机器走，不会「换了端口就又弹一次」。
+const GUIDE_KEY = 'wb-guide-seen';
+
+function openGuide() {
+  $('guide-backdrop').classList.remove('hidden');
+}
+function closeGuide() {
+  $('guide-backdrop').classList.add('hidden');
+  try { localStorage.setItem(GUIDE_KEY, '1'); } catch { /* 隐私模式下写不了，无所谓 */ }
+}
+
+$('guide-btn').addEventListener('click', openGuide);
+$('guide-close').addEventListener('click', closeGuide);
+// 点背景空白处关闭（点到卡片本体不关，不然选文字会误关）
+$('guide-backdrop').addEventListener('mousedown', (e) => {
+  if (e.target === $('guide-backdrop')) closeGuide();
+});
+// 两个引导按钮直接接到真正的功能上，别让用户看完自己找入口
+$('guide-import').addEventListener('click', () => { closeGuide(); $('import-file').click(); });
+$('guide-ai').addEventListener('click', () => { closeGuide(); openAiDialog(); });
+
+// 什么时候自动弹：**从没看过，并且三条列表都是空的**。
+// 两个条件缺一不可：
+//   - 已经有数据的人不是新用户，弹给他等于打扰；
+//   - 只看 localStorage 的话，把笔记全删掉的用户下次又被拦一次。
+// 读列表失败（服务还没起来）就当「不弹」，宁可少弹一次也别在报错时添乱。
+async function openGuideIfFirstRun() {
+  let seen = false;
+  try { seen = localStorage.getItem(GUIDE_KEY) === '1'; } catch { }
+  if (seen) return;
+  try {
+    const [ns, ts, bs] = await Promise.all([
+      api('/api/notes'), api('/api/tasks'), api('/api/bookmarks'),
+    ]);
+    if (Array.isArray(ns) && ns.length === 0
+        && Array.isArray(ts) && ts.length === 0
+        && Array.isArray(bs) && bs.length === 0) {
+      openGuide();
+    } else {
+      // 不是新用户：直接记成「看过」，以后连列表都不用查
+      try { localStorage.setItem(GUIDE_KEY, '1'); } catch { }
+    }
+  } catch { /* 读不到就别弹 */ }
+}
 
 // ============ 启动 ============
 setMode(mode);
@@ -3956,6 +4107,7 @@ renderHints();
 reloadCurrentView();
 // 静默读一次配置，只为顶栏那个小圆点。读不到就算了，不打扰用户。
 api('/api/ai/config').then(d => { aiCatalog = d; updateAiDot(d.config); }).catch(() => {});
+openGuideIfFirstRun();   // 新用户（从没看过 + 库是空的）自动弹引导
 </script>
 </body>
 </html>

@@ -55,6 +55,13 @@ async function req(method, path, body) {
   const keep = await req('POST', '/api/notes', { title: '  前后有空格  ', body: 'x' });
   ok('标题会 trim 但内容保留', keep.body.title === '前后有空格', `实际="${keep.body.title}"`);
 
+  // 上面两条是为了测标题兜底而临时造的，测完立刻删掉。
+  // 不删的话它们会一直躺在用户的笔记列表里 —— 而且「无标题」这种标题
+  // 清理脚本不敢按名字去认（用户自己真写一条无标题笔记很正常），
+  // 只能由造它的这个脚本自己负责收摊。
+  await req('DELETE', `/api/notes/${note.body.id}`);
+  await req('DELETE', `/api/notes/${keep.body.id}`);
+
   // ---------------- due_date 归一化 ----------------
   console.log('\n【due_date 归一化】');
   const cases = [

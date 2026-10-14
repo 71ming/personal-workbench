@@ -54,16 +54,16 @@ async function req(method, path, body) {
     }
   });
 
-  if (targets.length === 0) {
-    console.log('没有测试数据，库里是干净的');
-    process.exit(0);
-  }
-
-  console.log(`发现 ${targets.length} 条测试收藏，开始清理…`);
+  // 注意这里不能「一条测试收藏都没有就直接退出」：
+  // 测试任务和测试笔记跟收藏是分开造的，只跑了任务那套件的时候，
+  // 收藏一条也没有，早退就等于什么都没清，垃圾全留在库里。
   let okCount = 0;
-  for (const b of targets) {
-    const r = await req('DELETE', `/api/bookmarks/${b.id}`);
-    if (r.status === 200) okCount++;
+  if (targets.length > 0) {
+    console.log(`发现 ${targets.length} 条测试收藏，开始清理…`);
+    for (const b of targets) {
+      const r = await req('DELETE', `/api/bookmarks/${b.id}`);
+      if (r.status === 200) okCount++;
+    }
   }
 
   // 再软删掉之前遗留的同名测试任务（它们的链接指向 example.com）
