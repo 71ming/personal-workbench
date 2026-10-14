@@ -97,6 +97,22 @@ pub fn now_local(conn: &Connection) -> String {
         .unwrap_or_default()
 }
 
+/// 同 now_local，但**一个字节的数据库文件都不碰**。
+///
+/// 存在的唯一理由是启动自动备份：备份必须在碰数据库之前做，
+/// 而取时间戳这件事又必须跟库里其它时间同源。
+/// 如果为了取时间去 `Connection::open(db_path)`，那个调用会顺手把
+/// **空文件建出来** —— 于是「首次运行、根本没数据」也变成了一份
+/// 0 字节备份，目录里躺着个看着像备份、其实什么都没有的假货。
+///
+/// 内存数据库走的是同一个 SQLite 引擎、同一条 `datetime('now','localtime')`，
+/// 时间来源完全一致，只是不落盘。
+pub fn now_local_no_db() -> String {
+    Connection::open_in_memory()
+        .map(|c| now_local(&c))
+        .unwrap_or_default()
+}
+
 // 字段迁移：SQLite 的 CREATE TABLE IF NOT EXISTS **不会修改已存在的表**，
 // 所以老库缺的列必须单独 ALTER 补上。
 // 先查表结构再决定加不加，跑多少次都安全 —— 这条规矩是从 server.js 照搬的，

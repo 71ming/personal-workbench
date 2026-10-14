@@ -46,7 +46,7 @@
     │   ├── clean-test-data.js   清理测试残留
     │   └── make-icons.js
     └── src-tauri/         Tauri 2 + Rust
-        ├── src/*.rs       ai / db / fetch / http_server / import
+        ├── src/*.rs       ai / db / fetch / http_server / import / update / backup
         └── tauri.conf.json
 ```
 

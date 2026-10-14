@@ -19,6 +19,7 @@
 // ============================================================================
 
 pub mod ai;
+pub mod backup;
 pub mod db;
 pub mod fetch;
 pub mod http_server;
@@ -35,8 +36,9 @@ use tauri::Manager;
 ///   1. 先找前端文件在哪          —— 找不到就早点报错，别等窗口白屏了才猜
 ///   2. 决定数据存哪              —— 桌面应用不能再用「程序旁边的 data/」，
 ///                                   那是绿色安装的前提；必须放系统应用数据目录
-///   3. 起本地 HTTP 服务          —— 端口固定 8787，原因见 http_server.rs 顶部
-///   4. 最后才让窗口打开这个地址   —— 顺序反了窗口会先加载一个死地址然后白屏
+///   3. 备份数据库（开库之前）    —— 详见 backup.rs；装新版被卸载器删过数据，得自己留底
+///   4. 起本地 HTTP 服务          —— 端口固定 8787，原因见 http_server.rs 顶部
+///   5. 最后才让窗口打开这个地址   —— 顺序反了窗口会先加载一个死地址然后白屏
 ///
 /// #[cfg_attr(mobile, tauri::mobile_entry_point)] 这个属性现在不起作用（不是移动端），
 /// 但它标出了「移动端入口就是这一个函数」。将来加移动端时，
@@ -122,13 +124,25 @@ fn bootstrap(app: &tauri::App) -> Result<(), String> {
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("建数据目录失败：{}", e))?;
     let db_path = data_dir.join("workbench.db");
 
-    // ---- 3. 起 HTTP 服务 ----
+    // ---- 3. 启动自动备份 ----
+    //
+    // 位置很要紧：**在打开数据库之前**。
+    //
+    // 起因是一次真实的数据丢失（装新版时卸载器把整个数据目录删了，
+    // 详见 backup.rs 顶部）。既然安装器管不住，那就自己留一份：
+    // 每次启动先把 workbench.db 原样复制到 backups/，带时间戳，保留最近 10 份。
+    //
+    // 取时间戳用的是 now_local_no_db() 而不是 now_local(连接) ——
+    // 后者会先把空数据库文件建出来，那样首次运行也会留下一份 0 字节的假备份。
+    backup::run_once(&db_path, &db::now_local_no_db());
+
+    // ---- 4. 起 HTTP 服务 ----
     //
     // AppHandle 一起传进去：自动更新要靠它拿 updater（界面没有 Tauri IPC，
     // 只能在 Rust 侧调，详见 update.rs 顶部）。
     let port = http_server::serve(db_path, public_dir, Some(app.handle().clone()))?;
 
-    // ---- 4. 窗口指向真实地址 ----
+    // ---- 5. 窗口指向真实地址 ----
     //
     // tauri.conf.json 里没配 url（配了会被当成默认地址先加载一次，
     // 然后我们再跳走，白白多一次失败请求）。

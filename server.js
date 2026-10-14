@@ -9,6 +9,75 @@ const PORT = 8787;
 const ROOT = __dirname;
 const DB_PATH = path.join(ROOT, 'data', 'workbench.db');
 
+// ---------- 启动自动备份 ----------
+//
+// 和桌面版 backup.rs 是同一件事、同一个规矩：**每次启动先把 workbench.db
+// 整份复制到 data/backups/，带时间戳，保留最近 10 份。**
+//
+// 为什么两个后端都得有：界面是共用的 public/index.html，
+// 备份目录的位置虽然各存各的，但「启动前留一份底」这个行为不能只有一个有 ——
+//
+//   否则就出现很别扭的情况：Node 版从没被安装器碰过（它压根不在 Program Files 里），
+//   偏偏是「安全」的那个忘了备份，而真正有风险的那个记得备份。
+//   规矩得是一套，不然下一个人照着 Node 版改，会以为备份已经有了。
+//
+// 起因是一次真实的数据丢失：装桌面新版时旧版卸载器把整个数据目录删了。
+// 教训不是「卸载时别勾删除数据」——那要靠人记得。教训是数据得有一份
+// 不由安装器管的副本。完整说明见 desktop/src-tauri/src/backup.rs 顶部。
+//
+// 放在打开数据库**之前**：先开库会把空文件建出来，
+// 那样首次运行也会留下一份 0 字节的假备份。
+function backupOnceOnStartup() {
+  const KEEP = 10;                    // 留几份，和桌面版一致
+  const BACKUP_DIR = path.join(path.dirname(DB_PATH), 'backups');
+
+  // 库还不存在 = 首次运行，本来就没有东西可丢，跳过。
+  if (!fs.existsSync(DB_PATH)) return;
+
+  // 本地时间，格式跟库里其它时间一样：YYYY-MM-DD HH:MM:SS
+  const p = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  const ts = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+             `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // 文件名里的空格和冒号换成 - 和空：Windows 文件名中冒号是非法字符，
+  // 直接用会创建失败 —— 而失败会被当成「备份没做」静悄悄跳过。
+  const name = `workbench-${ts.replace(/[: ]/g, '-')}.db`;
+
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, name));
+
+    // 清理老备份：文件名里的时间戳定长可比，排序就等于按时间排序。
+    // 删失败不致命 —— 备份本身已经成了。
+    const olds = fs.readdirSync(BACKUP_DIR)
+      .filter(n => n.startsWith('workbench-') && n.endsWith('.db') && n !== name)
+      .sort();
+    for (const old of olds.slice(0, Math.max(0, olds.length - KEEP))) {
+      try { fs.unlinkSync(path.join(BACKUP_DIR, old)); } catch { /* 算它已经不在了 */ }
+    }
+    writeLog(`${ts}  已备份 → ${path.join(BACKUP_DIR, name)}\n`);
+  } catch (e) {
+    // 备份失败绝不能让程序起不来：数据库还在、用户还能干活。
+    // 因为「备份失败」就把程序卡在启动阶段是本末倒置。
+    try { writeLog(`${ts}  备份失败：${e.message}\n`); }
+    catch { /* 日志都写不了，那就只能算了 */ }
+  }
+}
+
+// 写备份日志，**开头带 UTF-8 BOM**。
+//
+// 这个文件是给**人**看的：双击用记事本打开，「上次启动到底备份没备份」
+// 是第一个要回答的问题。不带 BOM 的话记事本按系统 ANSI（中文 Windows 是 GBK）
+// 去读，满屏乱码，等于没写。桌面版 backup.rs 里是同一个理由，
+// 跟「启动.bat 必须 UTF-8 BOM」「启动错误.log 必须 BOM」也是同一个坑。
+//
+// BOM 写成 '\uFEFF' 而不是把真正的 BOM 字符打进源码 —— 后者在编辑器里
+// 是看不见的，复制粘贴会丢，存盘时还可能被顺手清掉。实测踩过这种「隐形字符」。
+function writeLog(text) {
+  fs.writeFileSync(path.join(path.dirname(DB_PATH), '备份.log'), '\uFEFF' + text);
+}
+backupOnceOnStartup();
+
 // ---------- 数据库 ----------
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
