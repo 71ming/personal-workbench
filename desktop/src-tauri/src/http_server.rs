@@ -236,9 +236,13 @@ fn route(
             }
             // /api/notes/:id 及其子路径
             2..=3 => {
-                let id: i64 = seg[1]
-                    .parse()
-                    .map_err(|_| "id 不是数字".to_string())?;
+                // id 不是数字 → 400，不是 500。
+                // 这是「客户端传错了」，不是「服务器坏了」，两者的区别在前端和日志里都有意义。
+                // server.js 也是 400（`Number('abc')` 是 NaN，isInteger 为假）。
+                let id: i64 = match seg[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => return Ok(json_response(400, &json!({ "error": "bad id" }))),
+                };
                 let conn = db::open(db_path)?;
 
                 // /api/notes/:id/restore
@@ -280,26 +284,105 @@ fn route(
         }
     }
 
+    // ============ 任务 ============
+    // 结构和笔记一模一样，刻意保持一致：以后加功能照着抄一遍就行，不用重新想。
+    if seg[0] == "tasks" {
+        match seg.len() {
+            // GET /api/tasks?search=关键词
+            1 if *method == Method::Get => {
+                let conn = db::open(db_path)?;
+                let kw = query.get("search").map(|s| s.as_str());
+                let rows = db::list_tasks(&conn, kw)?;
+                return Ok(json_response(200, &Value::Array(rows)));
+            }
+            // POST /api/tasks
+            1 if *method == Method::Post => {
+                let conn = db::open(db_path)?;
+                let payload = read_json(body)?;
+                let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let due = payload
+                    .get("due_date")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let task = db::create_task(&conn, title, due)?;
+                return Ok(json_response(200, &task));
+            }
+            2..=3 => {
+                // id 不是数字 → 400，不是 500。
+                // 这是「客户端传错了」，不是「服务器坏了」，两者的区别在前端和日志里都有意义。
+                // server.js 也是 400（`Number('abc')` 是 NaN，isInteger 为假）。
+                let id: i64 = match seg[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => return Ok(json_response(400, &json!({ "error": "bad id" }))),
+                };
+                let conn = db::open(db_path)?;
+
+                if seg.len() == 3 && seg[2] == "restore" && *method == Method::Post {
+                    return match db::restore_task(&conn, id)? {
+                        Some(task) => Ok(json_response(200, &task)),
+                        None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                    };
+                }
+
+                if seg.len() != 2 {
+                    return Ok(json_response(404, &json!({ "error": "no such endpoint" })));
+                }
+
+                match *method {
+                    Method::Get => {
+                        return match db::get_task(&conn, id)? {
+                            Some(task) => Ok(json_response(200, &task)),
+                            None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                        }
+                    }
+                    Method::Put => {
+                        let payload = read_json(body)?;
+                        let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("todo");
+                        let due = payload
+                            .get("due_date")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        return match db::update_task(&conn, id, title, status, due)? {
+                            Some(task) => Ok(json_response(200, &task)),
+                            None => Ok(json_response(404, &json!({ "error": "not found" }))),
+                        };
+                    }
+                    Method::Delete => {
+                        db::soft_delete_task(&conn, id)?;
+                        return Ok(json_response(200, &json!({ "ok": true })));
+                    }
+                    _ => return Ok(json_response(404, &json!({ "error": "no such endpoint" }))),
+                }
+            }
+            _ => return Ok(json_response(404, &json!({ "error": "no such endpoint" }))),
+        }
+    }
+
     // /api/search?q=关键词 —— 一次返回所有类型。
-    // 阶段 0 只有笔记是真数据，另外两个先空着，但 key 必须都在 ——
-    // 前端直接读 data.notes / data.tasks / data.bookmarks，缺一个就报错。
+    // 「哪些东西能被搜到」这个决定收在后端这一处：
+    // 加了新类型，这里加一段查询、返回里加一个 key，前端只管渲染。
     if seg[0] == "search" && seg.len() == 1 && *method == Method::Get {
         let conn = db::open(db_path)?;
         let keyword = query.get("q").cloned().unwrap_or_default();
-        let rows = db::list_notes(&conn, Some(&keyword))?;
+        let notes = db::list_notes(&conn, Some(&keyword))?;
+        let tasks = db::list_tasks(&conn, Some(&keyword))?;
         return Ok(json_response(
             200,
             &json!({
                 "keyword": keyword,
-                "notes": rows,
-                "tasks": [],
+                "notes": notes,
+                "tasks": tasks,
+                // 收藏还没平移，这里先空着；平移之后这里会变成真查询。
+                // key 必须留着 —— 前端直接读 data.bookmarks，缺了会报错。
                 "bookmarks": [],
             }),
         ));
     }
 
-    // 阶段 0 的占位：任务和收藏返回空数组，等下个阶段平移。
-    if (seg[0] == "tasks" || seg[0] == "bookmarks") && seg.len() == 1 && *method == Method::Get {
+    // 阶段 0 的占位：收藏返回空数组，等下个阶段平移。
+    // （任务已经平移完了 —— 见上面那个 seg[0] == "tasks" 分支）
+    if seg[0] == "bookmarks" && seg.len() == 1 && *method == Method::Get {
         return Ok(json_response(200, &json!([])));
     }
 

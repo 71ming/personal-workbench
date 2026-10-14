@@ -125,6 +125,43 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Stri
     Ok(false)
 }
 
+/// 标题兜底：空标题给个占位名。
+///
+/// **必须和 server.js 完全一致**，否则两个版本会在同一个库里写出不同的数据：
+/// server.js 存的是 `无标题`（无圆括号），而前端 `listTitle()` 的兜底显示
+/// 是 `（无标题）`（有圆括号）—— 那是给「万一库里是空的」准备的第二道防线。
+///
+/// 少了这一步会怎样：桌面版建出来的笔记标题是空的，
+/// 界面靠前端兜底看着还行，但**搜「无标题」搜不到它**，而 Node 版建的能搜到。
+/// 同一份数据、同一套搜索，结果却取决于它是谁建的 —— 这种不一致极难察觉。
+fn title_or(title: &str, fallback: &str) -> String {
+    let t = title.trim();
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// 截止日期归一化：只认 `YYYY-MM-DD`，其余一律当成「不设截止」。
+///
+/// 跟 server.js 的 normDue() 同规则。不能直接拼进 SQL —— 接口是公开的，
+/// 前端传什么都得有这一道闸。格式不对就当没填，不报错。
+fn norm_due(v: &str) -> Option<String> {
+    let s = v.trim();
+    let ok = s.len() == 10
+        && s.as_bytes().get(4) == Some(&b'-')
+        && s.as_bytes().get(7) == Some(&b'-')
+        && s[..4].bytes().all(|c| c.is_ascii_digit())
+        && s[5..7].bytes().all(|c| c.is_ascii_digit())
+        && s[8..10].bytes().all(|c| c.is_ascii_digit());
+    if ok {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
 // ---------- 笔记 ----------
 
 // 把一行数据转成前端要的 JSON。
@@ -210,8 +247,11 @@ pub fn get_note(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
 }
 
 pub fn create_note(conn: &Connection, title: &str, body: &str) -> Result<Value, String> {
-    conn.execute("INSERT INTO notes (title,body) VALUES (?1,?2)", [title, body])
-        .map_err(|e| format!("新建失败：{}", e))?;
+    conn.execute(
+        "INSERT INTO notes (title,body) VALUES (?1,?2)",
+        rusqlite::params![title_or(title, "无标题"), body],
+    )
+    .map_err(|e| format!("新建失败：{}", e))?;
     // last_insert_rowid() 返回刚才那行的 id
     let id = conn.last_insert_rowid();
     get_note(conn, id)?.ok_or_else(|| "新建后读不回来".to_string())
@@ -233,7 +273,7 @@ pub fn update_note(conn: &Connection, id: i64, title: &str, body: &str) -> Resul
         .execute(
             "UPDATE notes SET title=?1, body=?2, updated_at=datetime('now','localtime')
              WHERE id=?3 AND deleted_at IS NULL",
-            rusqlite::params![title, body, id],
+            rusqlite::params![title_or(title, "无标题"), body, id],
         )
         .map_err(|e| format!("保存失败：{}", e))?;
 
@@ -318,6 +358,215 @@ pub fn export_markdown(conn: &Connection) -> Result<String, String> {
     if count == 0 {
         out.push_str("（还没有笔记）\n");
     }
+
+    // ---- 任务 ----
+    //
+    // 用 Markdown 的待办语法 `- [ ]` / `- [x]`，这样导出文件在别的编辑器里
+    // 打开也是能勾的，不是一堆纯文本。
+    //
+    // 排序跟界面一致：未完成在前、有截止日期的在前、越早到期越靠前 ——
+    // 备份是给人看的，顺序乱了就不好找。
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT title,status,due_date FROM tasks
+             WHERE deleted_at IS NULL ORDER BY {}",
+            TASK_ORDER
+        ))
+        .map_err(|e| e.to_string())?;
+    let task_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tasks: Vec<(String, String, Option<String>)> = Vec::new();
+    for r in task_rows {
+        tasks.push(r.map_err(|e| e.to_string())?);
+    }
+
+    if !tasks.is_empty() {
+        out.push_str("\n# 任务\n\n");
+        for (title, status, due) in &tasks {
+            let mark = if status == "done" { "x" } else { " " };
+            let line = match due {
+                Some(d) => format!("- [{}] {}（{}截止）", mark, title, format_due_cn(d)),
+                None => format!("- [{}] {}", mark, title),
+            };
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+
     Ok(out)
 }
 
+/// `2026-10-15` → `10月15日`。
+///
+/// 导出是给人读的，写 `2026-10-15截止` 也认得出来，但中文格式短得多，
+/// 一行放得下。年份就不带了 —— 备份里的东西基本都是今年的。
+fn format_due_cn(d: &str) -> String {
+    if d.len() != 10 {
+        return d.to_string();
+    }
+    let m = &d[5..7];
+    let day = &d[8..10];
+    let (mm, dd) = match (m.trim_start_matches('0'), day.trim_start_matches('0')) {
+        ("", _) => (m.to_string(), day.to_string()),
+        (_, "") => (m.to_string(), day.to_string()),
+        (a, b) => (a.to_string(), b.to_string()),
+    };
+    format!("{}月{}日", mm, dd)
+}
+
+
+// ============================================================================
+// 任务
+// ============================================================================
+//
+// 跟笔记一样是独立的一张表（方案.md 里定过的「一张表一个概念」），接口结构
+// 也刻意做成和笔记一模一样，以后加东西照着抄就行。
+//
+// —— 排序规则是照搬 server.js 的，四个条件缺一不可 ——
+//
+//   (status = 'done') ASC    未完成排前面
+//   (due_date IS NULL) ASC   有截止日期的排前面
+//   due_date ASC              越早到期越靠前
+//   created_at ASC            同一天的最后建的在前
+//
+// 「逾期」不是靠一个标记算出来的 —— 截止日期早于今天且还没完成的任务，
+// 它的 due_date 天然就是最早的，于是自然浮到最上面。不用写额外逻辑，
+// 也不会出现「标记忘了更新」导致逾期任务没置顶的情况。
+
+/// 任务行 → JSON。
+///
+/// 跟笔记列表不同，这里返回**全部字段**（server.js 用的是 `SELECT *`），
+/// 因为前端的任务编辑区要用 created_at 和 completed_at。
+/// 字段名必须一模一样，否则前端读不到。
+fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id":           row.get::<_, i64>(0)?,
+        "title":        row.get::<_, String>(1)?,
+        "status":       row.get::<_, String>(2)?,
+        "due_date":     row.get::<_, Option<String>>(3)?,
+        "completed_at": row.get::<_, Option<String>>(4)?,
+        "created_at":   row.get::<_, String>(5)?,
+        "updated_at":   row.get::<_, String>(6)?,
+        "deleted_at":   row.get::<_, Option<String>>(7)?,
+    }))
+}
+
+const TASK_ORDER: &str = "(status = 'done') ASC, (due_date IS NULL) ASC, due_date ASC, created_at ASC";
+
+pub fn list_tasks(conn: &Connection, search: Option<&str>) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    match search {
+        Some(kw) if !kw.is_empty() => {
+            // 任务**只搜标题**，不搜正文 —— 任务压根没有正文字段。
+            let pattern = format!("%{}%", kw);
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT * FROM tasks WHERE deleted_at IS NULL AND title LIKE ?1 \
+                     ORDER BY {}",
+                    TASK_ORDER
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&pattern], task_row).map_err(|e| e.to_string())?;
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+        }
+        _ => {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY {}",
+                    TASK_ORDER
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], task_row).map_err(|e| e.to_string())?;
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn get_task(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM tasks WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([id], task_row).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out.into_iter().next())
+}
+
+pub fn create_task(conn: &Connection, title: &str, due_date: &str) -> Result<Value, String> {
+    conn.execute(
+        "INSERT INTO tasks (title,due_date) VALUES (?1,?2)",
+        rusqlite::params![title_or(title, "未命名任务"), norm_due(due_date)],
+    )
+    .map_err(|e| format!("新建任务失败：{}", e))?;
+    let id = conn.last_insert_rowid();
+    get_task(conn, id)?.ok_or_else(|| "新建后读不回来".to_string())
+}
+
+/// 更新。标题、完成状态、截止日期**三个字段一起存**——
+/// 前端自动保存每次都带全三个，所以不做局部更新，免得漏字段。
+pub fn update_task(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    status: &str,
+    due_date: &str,
+) -> Result<Option<Value>, String> {
+    // 只认两个值。别的（'DONE'、'完成'、''、null）一律当待办 ——
+    // 状态字段是会被前端反复传回来的，不做白名单就等着被写花。
+    let st = if status == "done" { "done" } else { "todo" };
+
+    // completed_at 的判断写进 SQL：
+    //   完成时保留原完成时间（重复保存不会把完成时刻刷掉）
+    //   取消完成时清空
+    //
+    // 放在 SQL 里做，而不是「先读出来、算一算、再写回去」——
+    // 后者在并发的两次保存之间会丢更新，而这里一次语句就完事。
+    let changed = conn
+        .execute(
+            "UPDATE tasks SET title=?1, status=?2, due_date=?3,
+                    completed_at = CASE WHEN ?2='done'
+                      THEN COALESCE(completed_at, datetime('now','localtime'))
+                      ELSE NULL END,
+                    updated_at=datetime('now','localtime')
+             WHERE id=?4 AND deleted_at IS NULL",
+            rusqlite::params![title_or(title, "未命名任务"), st, norm_due(due_date), id],
+        )
+        .map_err(|e| format!("保存任务失败：{}", e))?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+    get_task(conn, id)
+}
+
+pub fn soft_delete_task(conn: &Connection, id: i64) -> Result<bool, String> {
+    let n = conn
+        .execute(
+            "UPDATE tasks SET deleted_at=datetime('now','localtime')
+             WHERE id=?1 AND deleted_at IS NULL",
+            [id],
+        )
+        .map_err(|e| format!("删除任务失败：{}", e))?;
+    Ok(n > 0)
+}
+
+pub fn restore_task(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
+    conn.execute("UPDATE tasks SET deleted_at=NULL WHERE id=?1", [id])
+        .map_err(|e| format!("撤销失败：{}", e))?;
+    get_task(conn, id)
+}
