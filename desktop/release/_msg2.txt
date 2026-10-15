@@ -1,0 +1,5 @@
+版本提到 0.6.3：打开链接交给系统浏览器
+
+顺带记一个坑（#81）：升版本号时用了 PowerShell 的
+Get-Content | Set-Content -NoNewline，结果把两个文件全压成一行，
+而且**不报错**。已用 git checkout 拉回，改用编辑工具改文件。
