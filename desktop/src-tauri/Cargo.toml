@@ -61,9 +61,24 @@ tiny_http = "0.12"
 #
 # blocking feature 会带一个额外的依赖和一点点线程开销，
 # 换的是整份代码不用改结构。划算。
+#
+# ⚠️ TLS 用的是 **rustls**，不是原来的 default-tls（系统 OpenSSL）。别改回去。
+#
+# 实测踩到的坑：手机端第一次构建直接失败，报
+#   Could not find directory of OpenSSL installation
+# 原因链条是 default-tls → native-tls → openssl-sys，
+# 那套要在**目标平台**上找到 OpenSSL 才能编译 ——
+# Windows 有（Schannel），**Android 没有**，而且装一个代价不小。
+#
+# rustls 是纯 Rust 实现，不依赖任何系统库，同一套代码四个平台都能编。
+# 附带好处：CA 证书直接编进二进制（webpki-roots），
+# 不再出现「换台电脑证书不对就抓不到网页」这种只在别人机器上复现的问题。
+#
+# 唯一的行为差别：以前用系统证书，现在用内置的 Mozilla CA 列表。
+# 对我们访问的这些正规站点（各家 AI 服务、正常网站）没有区别。
 reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
-  "default-tls",   # 用系统自带的 TLS（Windows: Schannel），不打包 OpenSSL
+  "rustls-tls",     # 纯 Rust 的 TLS，不依赖系统 OpenSSL —— 手机端能编过的关键
   "gzip",
   "charset",
   "http2",

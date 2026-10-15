@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只对 127.0.0.1 放行明文 HTTP，其余一律保持默认（禁止）。
+
+  —— 为什么非要这个文件
+  ——
+  Android 8（API 28）起默认禁止应用发 http:// 明文请求。
+  而这个应用的窗口加载的是 http://127.0.0.1:8787 ——
+  那是**本机回环地址**：请求根本没出这台手机，不存在被中间人截获的可能。
+  但 Android 不会区分「真·危险」和「自己跟自己说话」，一律拦掉。
+  不配这个的话，手机上打开就是一片白屏，而且日志里只写一句
+  「Cleartext HTTP traffic to 127.0.0.1 not permitted」，用户完全看不懂。
+
+  —— 为什么不用更省事的写法
+  ——
+  在 AndroidManifest 里写 android:usesCleartextTraffic="true" 一行就完事了，
+  但那是**对整个应用放开明文**：抓网页（fetch.rs）、
+  调 AI 接口（ai.rs）全都能走 http://。
+  等于为了让自己跟自己通信，把「可以往明文地址发数据」的门对全世界打开。
+  这里只要 127.0.0.1，其余照旧禁止。
+
+  —— 生效条件
+  ——
+  必须同时在 AndroidManifest.xml 的 <application> 上写
+  android:networkSecurityConfig="@xml/network_security_config"，
+  两者同时存在时以本文件为准。
+-->
+<network-security-config>
+    <!-- 回环：本机跟本机说话 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+
+    <!-- 别的域名一条都不写 = 沿用系统默认（禁止明文）。
+         这一段特意留空并写上注释，是为了将来有人来改这个文件时，
+         一眼能看到「这里是刻意的，不是漏了」。 -->
+</network-security-config>

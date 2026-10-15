@@ -4,7 +4,23 @@ data/
 # Rust / Tauri 构建产物。
 # target/ 是 cargo 的编译缓存，单个工程能到几个 GB，绝对不能进版本库。
 desktop/src-tauri/target/
-desktop/src-tauri/gen/
+
+# gen/ 下面是 `cargo tauri android init` 生成的 Android 工程
+# （另外还有 schemas，是能力配置的 JSON schema，纯生成物）。
+#
+# **android/ 这一整个是要提交的**，理由有两条，都不是「顺手」：
+#   1. 我们在里面放了**手工改动**：
+#      res/xml/network_security_config.xml（只对 127.0.0.1 放行明文 HTTP）
+#      和 AndroidManifest.xml 里指向它的那一行。
+#      这些不在版本库的话，换台机器 clone 就构建不出能用的包 ——
+#      而「构建能用的包」恰恰是这个文件存在的全部理由。
+#   2. 工程本身要完整。缺了 gradle 构建文件，`init` 未必会替你补齐，
+#      容易变成「目录在、文件缺」的半吊子状态，比没有还难查。
+# 它一共 35 个文件、约 260 KB，进版本库完全没负担。
+# 但 gradle 的缓存和构建中间产物不进（那些是 build/ 和 .gradle/）。
+desktop/src-tauri/gen/android/**/build/
+desktop/src-tauri/gen/android/**/.gradle/
+desktop/src-tauri/gen/schemas/
 
 # 打好的安装包（每个 2MB 左右，二进制）。
 # 放在仓库外是为了清target 缓存时不把它一起清掉；
@@ -14,6 +30,11 @@ desktop/release/*.exe
 # 更新清单同理：它每次发版都会变，是**产物**不是源码。
 # 它的内容由 tools/make-latest-json.js 生成。
 desktop/release/latest.json
+
+# Android 安装包。同理，是产物不是源码：
+# 一个 universal APK 就 34 MB（含 4 个架构的 .so），进 git 历史纯属灾难。
+# 源码在 desktop/src-tauri/gen/android/，想重新出一份跑 tools/sign-android.ps1。
+发布-安卓/
 
 # 编译/测试的输出日志。我习惯 `cargo build 2>&1 | Out-File err.txt`，
 # 不小心就 git add . 进去了 —— 它每次都不一样，会把历史冲得很难看。
