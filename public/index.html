@@ -4144,6 +4144,15 @@ document.addEventListener('keydown', (e) => {
 // 后端一律用 200 + ok:false + kind 表达失败（不是 4xx）——
 // 前端 api() 遇非 2xx 会抛异常，用户只能看到「接口出错」，
 // 精心写的那句人话提示他根本看不到。这条规矩在 AI 那块就吃过一次亏。
+//
+// **手机上按钮不一样**，靠后端回的 `mode` 区分：
+//   "install"（桌面）→ 按钮是「下载并安装」，点它走后端下载 + 装 + 重启
+//   "download"（手机）→ 按钮是「下载新版本」，点它用系统浏览器去下
+// 原因：Android 不允许一个应用悄悄把自己换掉，「安装未知来源的应用」
+// 这一步必须用户手动按。所以手机这边只做到「把包送到用户手上」为止。
+
+// 待下载的 APK 地址。mode==='download' 时才有值，桌面版一直是 null。
+let pendingUpdateUrl = null;
 
 function closeUpdateDialog() {
   $('update-backdrop').classList.add('hidden');
@@ -4168,6 +4177,7 @@ function updateFail(d) {
 async function openUpdateDialog() {
   $('update-backdrop').classList.remove('hidden');
   $('update-install').classList.add('hidden');
+  pendingUpdateUrl = null;
   updateShow('<p class="upd-line">正在检查…</p>');
   let d;
   try {
@@ -4182,14 +4192,30 @@ async function openUpdateDialog() {
     updateShow('<p class="upd-line">已经是最新版本（' + esc(d.current || '') + '）。</p>');
     return;
   }
+
+  // mode 决定按钮和文案。桌面是 install，手机是 download（理由见上面那段注释）。
+  const isDownload = d.mode === 'download';
+  pendingUpdateUrl = isDownload ? (d.url || '') : null;
+  // 后端已经把地址验过是不是 github 的 https 了；这里再兜一道，
+  // 万一哪天检查挪到了别处，不至于让这个页面变成任意网址的启动器。
+  if (isDownload && !/^https:\/\/github\.com\//.test(pendingUpdateUrl || '')) {
+    return updateFail({ kind: 'manifest', message: '下载地址不可信，没有打开' });
+  }
+
   const notes = (d.notes || '').trim();
   updateShow(
     '<p class="upd-line"><b>有新版本：' + esc(d.version) + '</b>' +
     (d.date ? '<span class="upd-date">' + esc(d.date) + '</span>' : '') +
     '（当前 ' + esc(d.current || '') + '）</p>' +
     (notes ? '<pre class="upd-notes">' + esc(notes) + '</pre>' : '') +
-    '<p class="upd-line upd-mute">安装包约 2MB，下载完会自动重启一次。数据不会受影响。</p>');
-  $('update-install').classList.remove('hidden');
+    '<p class="upd-line upd-mute">' +
+    (isDownload
+      ? '安装包约 35MB。会用系统浏览器下载，下完点一下就能装。<b>直接覆盖安装，不用先卸载</b>，数据不受影响。'
+      : '安装包约 2MB，下载完会自动重启一次。数据不会受影响。') +
+    '</p>');
+  const btn = $('update-install');
+  btn.textContent = isDownload ? '下载新版本' : '下载并安装';
+  btn.classList.remove('hidden');
 }
 
 $('update-btn').addEventListener('click', openUpdateDialog);
@@ -4199,6 +4225,16 @@ $('update-backdrop').addEventListener('mousedown', (e) => {
 });
 $('update-install').addEventListener('click', async () => {
   const btn = $('update-install');
+
+  // 手机：把 APK 地址交给系统浏览器去下载。
+  // 走 openExternal 是因为它在手机上调的是原生 Intent（opener 插件），
+  // 而这里**不能**在 WebView 里直接开 —— 34MB 的包经 WebView 下会没进度、
+  // 容易被杀，而且装 APK 浏览器本来就不肯干，得让系统文件/浏览器去接。
+  if (pendingUpdateUrl) {
+    openExternal(pendingUpdateUrl);
+    return;
+  }
+
   btn.disabled = true;
   btn.textContent = '正在下载…';
   updateShow('<p class="upd-line">正在下载并安装，大概几秒钟。装完会自动重启。</p>');

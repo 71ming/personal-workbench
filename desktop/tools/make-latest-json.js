@@ -16,12 +16,20 @@
 //             不能用 /releases/latest/download/…：
 //             那条指向「最新那个 release」，回头发新版时
 //             还没更新的老版本会突然去下新版的包（而且验签会失败）
+//
+// 顺带生成 android-latest.json：手机端的更新清单。
+// 桌面这套（tauri-plugin-updater）在手机上用不了（插件没注册，
+// 而且它做的事是「下完调安装器」，手机上也调不了），
+// 手机走的是「查清单 → 给个下载链接 → 系统浏览器去下 → 用户手动装」，
+// 所以只要一个极简的 json。详见 update.rs 里 android_check() 的注释。
 const fs = require('node:fs');
 const path = require('node:path');
 
 const NSIS_DIR = path.join(__dirname, '..', 'src-tauri', 'target', 'release', 'bundle', 'nsis');
 const OUT_DIR = path.join(__dirname, '..', 'release');
 const REPO = 'https://github.com/71ming/personal-workbench';
+// Android 侧载包放在仓库外面（跟 updater.key 一样的理由：不进 git 历史）
+const ANDROID_DIR = path.join(__dirname, '..', '..', '发布-安卓');
 
 const VERSION = process.argv[2];
 if (!VERSION) {
@@ -83,6 +91,24 @@ const manifest = {
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(path.join(OUT_DIR, 'latest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+
+// ---------- 手机端清单 ----------
+//
+// 附件名同样是纯 ASCII，理由跟上面那个 exe 一模一样（PowerShell 传中文参数会掉编码）。
+// 客户端那边还会再验一遍「必须是 github.com 的 https」，白名单只有它一家。
+const ANDROID_NAME = `PersonalWorkbench_${VERSION}_android.apk`;
+const androidManifest = {
+  version: VERSION,
+  notes: NOTES,
+  pub_date: new Date().toISOString(),
+  url: `${REPO}/releases/download/${TAG}/${ANDROID_NAME}`,
+};
+fs.writeFileSync(
+  path.join(OUT_DIR, 'android-latest.json'),
+  JSON.stringify(androidManifest, null, 2),
+  'utf8'
+);
+
 // NSIS 打出来的原始文件带中文名，这里复制成 ASCII 名。
 // 顺带记一条：**复制而不是改名** —— 原始包留在 target\release\bundle\nsis 里，
 // 改掉它会让下次打包时 makensis 的输出路径对不上，多余的麻烦。
@@ -98,6 +124,8 @@ console.log('来源包', src);
 console.log('地址  ', manifest.platforms['windows-x86_64'].url);
 console.log('清单  ', path.join(OUT_DIR, 'latest.json'));
 console.log('安装包', path.join(OUT_DIR, NAME));
+console.log('手机清单', path.join(OUT_DIR, 'android-latest.json'));
+console.log('手机地址', androidManifest.url);
 
 // 收尾自查：清单里写的文件名，必须和实际复制出来的文件名一模一样。
 // 这两条对不上就是「点下载必 404」，而「检查更新」那一步完全看不出来 ——
@@ -111,3 +139,19 @@ if (!decodeURIComponent(manifest.platforms['windows-x86_64'].url).endsWith('/' +
   process.exit(1);
 }
 console.log('自查  清单地址与实际文件名一致 ✔');
+
+// 手机端同样自查一遍文件名。
+// 这里**只警告不报错**：桌面发版时可能还没编 Android 包
+//（两个平台的节奏不必同步），而 apk 也不在这儿 —— 它由
+// tools/sign-android.ps1 出包。
+if (!androidManifest.url.endsWith('/' + ANDROID_NAME)) {
+  console.error('手机清单里的文件名对不上');
+  process.exit(1);
+}
+if (fs.existsSync(path.join(ANDROID_DIR, ANDROID_NAME))) {
+  console.log('自查  本地找到了对应的 APK ✔');
+} else {
+  console.warn(`提醒  本地没找到 ${ANDROID_NAME}`);
+  console.warn(`      这次如果要发 Android，先跑 tools/sign-android.ps1，`);
+  console.warn(`      再把 ${ANDROID_NAME} 连同 android-latest.json 一起传上去。`);
+}

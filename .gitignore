@@ -30,6 +30,8 @@ desktop/release/*.exe
 # 更新清单同理：它每次发版都会变，是**产物**不是源码。
 # 它的内容由 tools/make-latest-json.js 生成。
 desktop/release/latest.json
+# 手机端的清单，同一个脚本生成。
+desktop/release/android-latest.json
 
 # Android 安装包。同理，是产物不是源码：
 # 一个 universal APK 就 34 MB（含 4 个架构的 .so），进 git 历史纯属灾难。
