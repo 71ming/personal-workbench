@@ -41,11 +41,16 @@
 //   - 解析成功之后传出去的**不是用户原文，而是 Url 规范化之后的字符串**
 //     （空格之类会被编码成 %20 之类）。
 //     这一步看着多余，但它保证了交给子进程的东西里不会出现裸的空格、引号、换行。
-//   - 传给子进程时**不经过 shell**：Windows 用 explorer.exe 直接执行，
-//     不用 `cmd /c start` —— 后者会把 URL 里的 & | > 当成命令连接符，
+//   - 交给系统的是**规范化后的 URL**，而且 opener 插件内部不过 shell ——
+//     特意不用 `cmd /c start`：后者会把 URL 里的 & | > 当成命令连接符，
 //     一个地址就能变成一条命令。
 //
-// 这三条都在下面的单测里有对应的断言盯着。
+// 这三条安全约束**在移动端同样成立**，而且更重要：
+// 手机上 opener 走的是原生 Intent，交给系统的也是一个完整 URL，
+// 校验放松了就等于让一个收藏链接变成「让手机去做任意一件事」。
+// 所以 normalize() 是**两边都要过的那一道门**，不许为了移动端开个口子。
+//
+// 三条都有下面的单测盯着。
 
 use tauri::Url;
 
@@ -85,45 +90,32 @@ pub fn normalize(url: &str) -> Result<Url, String> {
 ///
 /// 返回 Err 只代表「叫不动系统程序」，不代表链接不合法 ——
 /// 合法性和能不能打开是两回事，提示语不能混。
-pub fn open_in_system_browser(url: &str) -> Result<(), String> {
+///
+/// —— 为什么用 tauri-plugin-opener，而不是自己 spawn 一个程序 ——
+///
+/// 最早这里写的是手搓的三段 `#[cfg]`：Windows 调 `explorer.exe`、
+/// macOS 调 `open`、其它调 `xdg-open`。在桌面上没问题，
+/// **但手机上三条全都不存在** —— Android 和 iOS 都没有
+/// 「从命令行调另一个程序打开网页」这回事（iOS 沙箱里甚至没有进程派生）。
+///
+/// 而 `tauri-plugin-opener` **一个 API 覆盖全平台**：
+/// `app.opener().open_url(url, None)` 在桌面上调系统程序，在手机上走原生
+/// 的 Intent / UIApplication 跳转。这是官方插件，平台差异由它负责，
+/// 比自己维护三段 `#[cfg]` 可靠得多。
+pub fn open_in_system_browser<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    url: &str,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
     let u = normalize(url)?;
 
     // 传 Url 规范化之后的字符串，不是用户原文。理由见文件顶部。
     let target = u.as_str().to_string();
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // explorer.exe 是「用系统默认程序打开这个地址」的官方入口，
-        // 对 http(s) 它会交给默认浏览器。
-        //
-        // 特意**不用** `cmd /c start`：cmd 会把 URL 里的 & | > 解释成命令连接符，
-        // 一个普通地址就能变成一条可执行的命令。explorer.exe 直接吃参数，不过 shell。
-        std::process::Command::new("explorer.exe")
-            .arg(&target)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("打不开默认浏览器：{}", e))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&target)
-            .spawn()
-            .map_err(|e| format!("打不开默认浏览器：{}", e))?;
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&target)
-            .spawn()
-            .map_err(|e| format!("打不开默认浏览器：{}", e))?;
-    }
-
-    Ok(())
+    app.opener()
+        .open_url(target, None::<&str>)
+        .map_err(|e| format!("打不开默认浏览器：{}", e))
 }
 
 #[cfg(test)]

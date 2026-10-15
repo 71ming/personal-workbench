@@ -212,6 +212,11 @@ fn handle(
             let _ = request.respond(response);
             return;
         }
+        if path.trim_end_matches('/') == "/api/open" {
+            let response = open_route(&method, &path, &query, app_handle);
+            let _ = request.respond(response);
+            return;
+        }
         let response = match route(&method, &path, &query, request.as_reader(), db_path) {
             Ok(resp) => resp,
             Err(e) => json_response(500, &json!({ "error": e })),
@@ -264,6 +269,53 @@ fn update_route(
     }
 }
 
+// ---------- 打开外部链接 ----------
+//
+// GET /api/open?url=…  交给**系统默认浏览器**打开，不是在这个窗口里开。
+//
+// 为什么不用 target="_blank"：那是浏览器语义，在 Tauri 窗口里要么弹个
+// 应用内网页窗口把工作台盖住，要么点了什么都不发生。见 open.rs 顶部。
+//
+// 跟 update_route 一样**不进 route()**：它要 AppHandle
+// （opener 插件是从 Tauri 手里拿的），而 route() 的参数是为「只需要数据库」
+// 的那些接口设计的，不该给它加负担。
+fn open_route(
+    method: &Method,
+    path: &str,
+    query: &HashMap<String, String>,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Response<Box<dyn Read + Send>> {
+    let tail = path.trim_start_matches("/api/open").trim_matches('/');
+    if tail != "" {
+        return json_response(404, &json!({ "error": "no such endpoint" }));
+    }
+
+    // 方法不对是 400（你调用方式错了），不是 404（没这个接口）。Node 版同款。
+    if *method != Method::Get {
+        return json_response(400, &json!({ "error": "open 只接受 GET" }));
+    }
+
+    let raw = match query.get("url") {
+        Some(u) => u.as_str(),
+        None => return json_response(400, &json!({ "error": "缺少 url 参数" })),
+    };
+
+    // 没有 AppHandle 只可能发生在单元测试里。生产环境一定有。
+    let app = match app_handle {
+        Some(a) => a,
+        None => {
+            return json_response(400, &json!({ "ok": false, "message": "这个后端打不开外部链接。" }))
+        }
+    };
+
+    // 成功 200；失败也是 400 —— 链接不合法/打不开是「你点错了」，
+    // 不是「服务器坏了」。前端会把 message 原样显示出来。
+    match crate::open::open_in_system_browser(app, raw) {
+        Ok(()) => json_response(200, &json!({ "ok": true })),
+        Err(e) => json_response(400, &json!({ "ok": false, "message": e })),
+    }
+}
+
 // ---------- 路由 ----------
 //
 // 阶段 0 的范围：**只把笔记做成真的**，任务和收藏先返回空数组。
@@ -291,33 +343,6 @@ fn route(
         .trim_matches('/')
         .split('/')
         .collect();
-
-    // /api/open?url=...
-    //
-    // 把链接交给**系统默认浏览器**打开，不是在这个窗口里开。
-    // 为什么不用 target="_blank"：那是浏览器语义，在 Tauri 窗口里要么弹个
-    // 应用内网页窗口把工作台盖住，要么点了什么都不发生。
-    // 详细理由和绕开 shell 的必要性见 open.rs 顶部。
-    //
-    // 放在最前面是因为它**根本不用数据库** —— 排在 notes 前面，
-    // 一眼就能看出「这不是一个查数据的接口」。
-    if seg[0] == "open" {
-        // 只认 GET，而且**必须带 url 参数**。
-        // 少了参数不是 404 而是 400：路径是对的，是参数不对。
-        if *method != Method::Get {
-            return Ok(json_response(400, &json!({ "error": "open 只接受 GET" })));
-        }
-        let raw = match query.get("url") {
-            Some(u) => u.as_str(),
-            None => return Ok(json_response(400, &json!({ "error": "缺少 url 参数" }))),
-        };
-        return match crate::open::open_in_system_browser(raw) {
-            Ok(()) => Ok(json_response(200, &json!({ "ok": true }))),
-            // 这里是**400 而不是 500**：链接不合法是「你点错了」，
-            // 不是「服务器坏了」。前端会把这个 message 原样显示出来。
-            Err(e) => Ok(json_response(400, &json!({ "ok": false, "message": e }))),
-        };
-    }
 
     // /api/notes...
     if seg[0] == "notes" {

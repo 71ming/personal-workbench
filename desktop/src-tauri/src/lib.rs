@@ -56,9 +56,15 @@ pub fn run() {
     // 报出来的是「expected expression, found `.`」—— 跟「插件注册写错了」毫无关系，
     // 能让人查半天。所以这里拆成两个 builder 再 let 起来。
     #[cfg(desktop)]
-    let builder = tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // opener：**全平台都要注册**，不是只有桌面。
+        // 「打开链接」在手机上没有 explorer.exe / open / xdg-open 可用，
+        // 靠的就是这个插件走原生 Intent。见 open.rs 顶部。
+        .plugin(tauri_plugin_opener::init());
     #[cfg(not(desktop))]
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init());
 
     builder
         .setup(|app| {
@@ -197,21 +203,37 @@ fn report_failure(app: &tauri::App, message: &str) {
     bytes.extend_from_slice(body.as_bytes());
     let _ = std::fs::write(&log_path, &bytes);
 
-    // 打开日志。用 `start` 而不是直接调 notepad.exe：
-    // notepad.exe 在较新 Windows 上是个应用别名，直接调可能找不到，
-    // `cmd /c start` 走 shell 的文件关联，稳定得多。
-    #[cfg(target_os = "windows")]
+    // 桌面端：当场用记事本打开日志。
+    //
+    // ⚠️ **手机端没有这一段，而且这是必须的**：Android/iOS 沙箱里
+    // 「从本程序调另一个程序打开一个文件」这件事根本不成立
+    // （iOS 连进程派生都没有）。硬写在这儿的下场是**编译失败**，
+    // 不是「手机上打不开日志」那么温和。
+    //
+    // 手机上用户在 app 内看到的是一个白屏，什么提示都收不到 ——
+    // 这个短板要靠真机测试时盯紧点，别假设它跟桌面一样。
+    #[cfg(desktop)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", "", log_path.to_str().unwrap_or("")])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(&log_path).spawn();
+        // 用 `start` 而不是直接调 notepad.exe：
+        // notepad.exe 在较新 Windows 上是个应用别名，直接调可能找不到，
+        // `cmd /c start` 走 shell 的文件关联，稳定得多。
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "", log_path.to_str().unwrap_or("")])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&log_path).spawn();
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&log_path).spawn();
+        }
     }
 }
 
