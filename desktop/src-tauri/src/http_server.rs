@@ -292,6 +292,33 @@ fn route(
         .split('/')
         .collect();
 
+    // /api/open?url=...
+    //
+    // 把链接交给**系统默认浏览器**打开，不是在这个窗口里开。
+    // 为什么不用 target="_blank"：那是浏览器语义，在 Tauri 窗口里要么弹个
+    // 应用内网页窗口把工作台盖住，要么点了什么都不发生。
+    // 详细理由和绕开 shell 的必要性见 open.rs 顶部。
+    //
+    // 放在最前面是因为它**根本不用数据库** —— 排在 notes 前面，
+    // 一眼就能看出「这不是一个查数据的接口」。
+    if seg[0] == "open" {
+        // 只认 GET，而且**必须带 url 参数**。
+        // 少了参数不是 404 而是 400：路径是对的，是参数不对。
+        if *method != Method::Get {
+            return Ok(json_response(400, &json!({ "error": "open 只接受 GET" })));
+        }
+        let raw = match query.get("url") {
+            Some(u) => u.as_str(),
+            None => return Ok(json_response(400, &json!({ "error": "缺少 url 参数" }))),
+        };
+        return match crate::open::open_in_system_browser(raw) {
+            Ok(()) => Ok(json_response(200, &json!({ "ok": true }))),
+            // 这里是**400 而不是 500**：链接不合法是「你点错了」，
+            // 不是「服务器坏了」。前端会把这个 message 原样显示出来。
+            Err(e) => Ok(json_response(400, &json!({ "ok": false, "message": e }))),
+        };
+    }
+
     // /api/notes...
     if seg[0] == "notes" {
         match seg.len() {

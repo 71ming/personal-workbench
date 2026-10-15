@@ -24,6 +24,7 @@ pub mod db;
 pub mod fetch;
 pub mod http_server;
 pub mod import;
+pub mod open;
 pub mod update;
 
 use std::path::PathBuf;

@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = 8787;
@@ -1318,40 +1319,50 @@ function handleSearch(res, keyword) {
 
 // ---------- 接口 ----------
 async function api(req, res, url) {
-  const seg = url.pathname.split('/').filter(Boolean); // ['api','notes',id?]
+  // 路径先规范化再进路由：**去掉尾斜杠**。
+  //
+  // 为什么：Rust 那边的切法是 `trim_matches('/')`，`/api/open/` 和 `/api/open`
+  // 在那边是同一个路径。这边不处理的话，同一个界面在两个后端上行为就不一样 ——
+  // 而「两后端行为必须逐条对齐」是这个项目的硬规矩：
+  // 界面是共用的，缺一边不是「少个功能」，是「同一个操作在两个版本里结果不同」。
+  // 尾斜杠这种事平时绝不会有人注意，等到哪天真有人踩上就极难查。
+  //
+  // **这不是洁癖：写 /api/open/ 的测试就是为了抓它。**
+  const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  const seg = pathname.split('/').filter(Boolean); // ['api','notes',id?]
 
   // 导出全部笔记为 Markdown 文件
-  if (req.method === 'GET' && url.pathname === '/api/export') {
+  if (req.method === 'GET' && pathname === '/api/export') {
     return handleExport(req, res);
   }
 
   // 统一搜索：笔记 + 任务一起搜
-  if (req.method === 'GET' && url.pathname === '/api/search') {
+  if (req.method === 'GET' && pathname === '/api/search') {
     return handleSearch(res, url.searchParams.get('q') || '');
   }
 
   // ============ AI 配置（v3）===========
   // 注意这里只有「配置」接口，没有「调用」接口。
   // 调用要发真实网络请求、要花钱、会带上笔记内容，那是下一步单独做、单独测的事。
-  if (req.method === 'GET' && url.pathname === '/api/ai/config') {
+  if (req.method === 'GET' && pathname === '/api/ai/config') {
     return handleAiGetConfig(res);
   }
-  if (req.method === 'PUT' && url.pathname === '/api/ai/config') {
+  if (req.method === 'PUT' && pathname === '/api/ai/config') {
     return await handleAiPutConfig(req, res);
   }
 
   // 列出这家服务商当前可用的模型（要密钥，不花钱，不产生对话内容）
-  if (req.method === 'POST' && url.pathname === '/api/ai/models') {
+  if (req.method === 'POST' && pathname === '/api/ai/models') {
     return await handleAiModels(req, res);
   }
 
   // 测试连通性：发一句最短的话，不带任何笔记内容
-  if (req.method === 'POST' && url.pathname === '/api/ai/test') {
+  if (req.method === 'POST' && pathname === '/api/ai/test') {
     return await handleAiTest(req, res);
   }
 
   // 问 AI：只发用户勾选的笔记
-if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
+if (req.method === 'POST' && pathname === '/api/ai/ask') {
     return await handleAiAsk(req, res);
   }
 
@@ -1377,22 +1388,70 @@ if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
     // 不如照实说这是 Node 版。界面只需要拿它显示一行字。
     current: 'Node 版',
   };
-  if (req.method === 'GET' && url.pathname === '/api/update/check') {
+  if (req.method === 'GET' && pathname === '/api/update/check') {
     return send(res, 200, UNSUPPORTED_UPDATE);
   }
-  if (req.method === 'POST' && url.pathname === '/api/update/install') {
+  if (req.method === 'POST' && pathname === '/api/update/install') {
     return send(res, 200, UNSUPPORTED_UPDATE);
   }
 
+  // 把链接交给系统默认浏览器打开
+  //
+  // 为什么 Node 版也要有：界面 public/index.html 是两个后端共用的，
+  // 桌面版那边不能用 target="_blank"（那会在应用窗口里弹网页窗口），
+  // 所以界面统一改成调这个接口。**Node 版不接的话，
+  // 同一个界面在 Node 版上点「打开链接」就坏了** ——
+  // 这正是「两后端行为必须逐条对齐」那条规矩要防的事。
+  //
+  // 安全要点（跟桌面版 open.rs 一模一样的三条）：
+  //   1. 只放行 http/https，file: / javascript: / data: 一律拒绝；
+  //   2. 用 URL 解析，解析失败就拒，不靠正则猜；
+  //   3. 传给子进程的是**解析后规范化的地址**，不是用户原文，
+  //      而且**不过 shell** —— Windows 上特意用 explorer.exe 而不是
+  //      `cmd /c start`，因为 cmd 会把 URL 里的 & | > 当成命令连接符，
+  //      一个普通地址就能变成一条可执行的命令。
+  // 「打开链接」这个路径**先于方法判断**接住：
+  // 路径对了但方法不对，是 400（你调用方式错了），不是 404（没这个接口）。
+  // Rust 那边就是这么切的，两边必须一样。
+  if (pathname === '/api/open') {
+    if (req.method !== 'GET') {
+      return send(res, 400, { ok: false, message: 'open 只接受 GET。' });
+    }
+    const raw = url.searchParams.get('url');
+    if (!raw) return send(res, 400, { ok: false, message: '缺少 url 参数。' });
+    let u;
+    try {
+      u = new URL(raw.trim());
+    } catch {
+      return send(res, 400, { ok: false, message: '这不是一个网址（要以 http:// 或 https:// 开头）。' });
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return send(res, 400, { ok: false, message: `只能打开网页链接，不支持 ${u.protocol} 开头的地址。` });
+    }
+    if (!u.hostname) return send(res, 400, { ok: false, message: '这个网址里没有域名。' });
+    const opener = process.platform === 'win32' ? 'explorer.exe'
+                 : process.platform === 'darwin' ? 'open'
+                 : 'xdg-open';
+    try {
+      // 传 u.href（规范化的），不是 raw（用户原文）
+      const child = spawn(opener, [u.href], { detached: true, stdio: 'ignore' });
+      child.on('error', (e) => console.error('打不开默认浏览器：', e.message));
+      child.unref();
+    } catch (e) {
+      return send(res, 400, { ok: false, message: `打不开默认浏览器：${e.message}` });
+    }
+    return send(res, 200, { ok: true });
+  }
+
   // 笔记列表 / 搜索
-  if (req.method === 'GET' && url.pathname === '/api/notes') {
+  if (req.method === 'GET' && pathname === '/api/notes') {
     const s = url.searchParams.get('search')?.trim();
     if (s) return send(res, 200, q.search.all(`%${s}%`, `%${s}%`));
     return send(res, 200, q.list.all());
   }
 
   // 新建
-  if (req.method === 'POST' && url.pathname === '/api/notes') {
+  if (req.method === 'POST' && pathname === '/api/notes') {
     const { title = '', body = '' } = await readBody(req);
     const info = q.create.run(title.trim() || '无标题', body);
     return send(res, 200, q.get.get(info.lastInsertRowid));
@@ -1433,14 +1492,14 @@ if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
   // 结构和笔记一模一样，刻意保持一致：以后加功能时照着抄一遍就行，不用重新想。
 
   // 任务列表 / 搜索
-  if (req.method === 'GET' && url.pathname === '/api/tasks') {
+  if (req.method === 'GET' && pathname === '/api/tasks') {
     const s = url.searchParams.get('search')?.trim();
     if (s) return send(res, 200, tq.search.all(`%${s}%`));
     return send(res, 200, tq.list.all());
   }
 
   // 新建任务
-  if (req.method === 'POST' && url.pathname === '/api/tasks') {
+  if (req.method === 'POST' && pathname === '/api/tasks') {
     const { title = '', due_date = '' } = await readBody(req);
     const info = tq.create.run(title.trim() || '未命名任务', normDue(due_date));
     return send(res, 200, tq.get.get(info.lastInsertRowid));
@@ -1483,14 +1542,14 @@ if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
   // 同样照抄任务的结构。这里多一条规矩：链接必须是合法的 http/https 才收。
 
   // 收藏列表 / 搜索
-  if (req.method === 'GET' && url.pathname === '/api/bookmarks') {
+  if (req.method === 'GET' && pathname === '/api/bookmarks') {
     const s = url.searchParams.get('search')?.trim();
     if (s) return send(res, 200, bmq.search.all(`%${s}%`, `%${s}%`, `%${s}%`, `%${s}%`));
     return send(res, 200, bmq.list.all());
   }
 
   // 新建收藏
-  if (req.method === 'POST' && url.pathname === '/api/bookmarks') {
+  if (req.method === 'POST' && pathname === '/api/bookmarks') {
     const { url = '', title = '' } = await readBody(req);
     const u = normUrl(url);
     // 链接不合法就别入库。这条收藏本身也没意义，留个空壳更难删。
@@ -1574,7 +1633,7 @@ if (req.method === 'POST' && url.pathname === '/api/ai/ask') {
   //
   // 请求体是那个 .db 文件的原始字节，不是 JSON：SQLite 是二进制，
   // 包成 JSON 会被转义成 \u00xx，大小翻好几倍还多一层出错的可能。
-  if (req.method === 'POST' && url.pathname === '/api/import') {
+  if (req.method === 'POST' && pathname === '/api/import') {
     let bytes;
     try {
       bytes = await readBytes(req);
@@ -1722,6 +1781,8 @@ function staticFile(res, pathname) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    // 这里用 url.pathname，不是 api() 里面那个规范化过的 pathname ——
+    // 那是 api() 的局部变量，外层根本看不见它。
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     return staticFile(res, url.pathname);
   } catch (err) {

@@ -1299,8 +1299,13 @@
           <input id="bookmark-title" placeholder="给它起个名字，以后好找">
           <div class="bm-row">
             <span class="bm-host" id="bookmark-host"></span>
-            <a id="bookmark-open" class="btn" style="margin-left:auto"
-               target="_blank" rel="noopener noreferrer">打开链接 ↗</a>
+            <!-- 这里是 button 不是 a：点它不是「在窗口里跳走」，
+                 而是「请系统浏览器打开这个地址」（见下面的 openExternal）。
+                 原来写的 target="_blank" 是浏览器语义，在 Tauri 窗口里
+                 要么弹个应用内网页窗口把工作台盖住，要么点了什么都不发生。 -->
+            <button type="button" id="bookmark-open" class="btn" style="margin-left:auto">
+              打开链接 ↗
+            </button>
           </div>
           <p class="bm-hint" id="bookmark-hint">
             标题可以留空，会用网址自动生成一个。存好之后会自己去把网页的标题和正文抓回来。
@@ -1658,6 +1663,46 @@ function showBanner(msg) {
 function hideBanner() {
   $('banner').classList.add('hidden');
 }
+
+// ============ 打开外部链接 ============
+//
+// 交给**系统默认浏览器**打开，不是在工作台窗口里开。
+//
+// 为什么不用 <a target="_blank">：那是浏览器的语义。在浏览器里它等于「开新标签」，
+// 但在 Tauri 窗口里那是**你自己的应用窗口**，于是有两种都不对的结果：
+// 要么在应用里另开一个网页窗口把你的工作台盖住（还得一个个关回去），
+// 要么请求被 WebView 丢掉，点了**什么都不发生**。
+//
+// 到底会是哪一种取决于 wry / WebView 的版本和配置 —— 既然赌不了，
+// 就干脆不给它走浏览器那条路：自己把地址交给操作系统去开。
+//
+// 界面里所有要跳出去的链接都得走这个函数，别的地方别再写 target="_blank"。
+// （导出到 Markdown 的那些链接不算：那份文件是在别的编辑器里打开的。）
+async function openExternal(raw) {
+  const u = safeLink(raw);
+  if (!u) { showBanner('这不像一个能打开的网址，必须以 http:// 或 https:// 开头。'); return false; }
+  try {
+    const d = await api('/api/open?url=' + encodeURIComponent(u));
+    if (!d || !d.ok) {
+      showBanner((d && d.message) || '打不开这个链接。');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    showBanner('打不开这个链接：' + e.message);
+    return false;
+  }
+}
+
+// 页面上带 data-ext 的链接（比如「去控制台申请密钥」）统一交给系统浏览器。
+// 用事件委托而不是逐个绑 onclick：这些提示是动态拼出来的，
+// 委托一次就够，以后再添新的也不用记得改这里。
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-ext]');
+  if (!a) return;
+  e.preventDefault();
+  openExternal(a.getAttribute('data-ext'));
+});
 $('banner-retry').addEventListener('click', () => runSearch(searchEl.value));
 
 // 列表加载失败时的专用空状态：说清楚是「连不上」而不是「没内容」
@@ -2899,7 +2944,6 @@ function syncBookmarkFields() {
   }
   // 链接不合法时不给可点的入口
   bmOpenEl.classList.toggle('hidden', !ok);
-  if (ok) bmOpenEl.href = raw;
 }
 
 function openBookmark(id) {
@@ -3010,10 +3054,8 @@ bmUrlEl.addEventListener('input', () => {
 // 标题被手动改过之后，就不再自动覆盖
 bmTitleEl.addEventListener('input', () => { autoTitle = ''; scheduleBookmarkSave(); });
 
-// 点「打开链接」前先把 href 确认一遍
-bmOpenEl.addEventListener('click', (e) => {
-  if (!safeLink(bmUrlEl.value)) e.preventDefault();
-});
+// 点「打开链接」：交给系统浏览器，见 openExternal 的说明
+bmOpenEl.addEventListener('click', () => openExternal(bmUrlEl.value));
 
 // 删除：和笔记、任务一样是行内二次确认
 function bookmarkArmDelete() {
@@ -3768,7 +3810,7 @@ function aiOnProviderChange() {
   if (p.retired) bits.push('注意：' + p.retired);
   bits.push(`接口地址 <code>${esc(p.base_url)}</code>`);
   $('ai-pv-note').innerHTML = bits.join('<br>');
-  $('ai-key-hint').innerHTML = `没有密钥？去 <a href="${esc(p.key_url)}" target="_blank" rel="noopener noreferrer">${esc(p.name)}控制台</a> 申请。`;
+  $('ai-key-hint').innerHTML = `没有密钥？去 <a href="#" data-ext="${esc(p.key_url)}" rel="noopener noreferrer">${esc(p.name)}控制台</a> 申请。`;
 }
 
 // ---- 检测可用模型 ----

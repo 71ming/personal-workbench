@@ -241,9 +241,35 @@ mod tests {
 
     #[test]
     fn 版本号跟得上编译期那个() {
-        // 编译进 exe 的版本必须和 tauri.conf.json 里写的一致，
-        // 不一致的话界面会显示一个跟更新清单对不上的版本号。
-        assert_eq!(current_version(), "0.6.1");
+        // 要比的是 **Cargo.toml 和 tauri.conf.json 这两个版本号**：
+        //   界面显示的版本来自 CARGO_PKG_VERSION（Cargo.toml），
+        //   而打进安装包、写进签名清单的版本来自 tauri.conf.json。
+        // 这俩不是同一个东西，对不上就会出现「界面上写着 0.6.2，
+        // 而最新版本提示的是 0.6.3」这种没法解释的情况。
+        //
+        // 为什么读文件而不是直接写死一个版本号：
+        // 原来这条断言是 `assert_eq!(current_version(), "0.6.1")`，
+        // 看起来在盯着版本一致性，实际只是盯着「Cargo.toml 是不是那个字符串」。
+        // 于是每次升版本号它就红一次，而红的原因跟它声称要防的事毫无关系 ——
+        // 真实经历：提到 0.6.2 之后忘了重跑测试，隔了一天才在这里撞见。
+        // **一个只能靠「记得别改它」才能过的测试，是坏测试。**
+        let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let text = std::fs::read_to_string(&conf)
+            .unwrap_or_else(|e| panic!("读不到 tauri.conf.json：{}", e));
+        // 只需要顶层那个 "version"，不去引 serde_json（这里手写两行更省）。
+        let conf_version = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"version\":"))
+            .map(|v| v.trim().trim_end_matches(',').trim_matches('"'))
+            .unwrap_or_else(|| panic!("tauri.conf.json 里找不到顶层 version 字段"));
+
+        assert_eq!(
+            current_version(),
+            conf_version,
+            "Cargo.toml 是 {}，tauri.conf.json 是 {}，两个必须一样",
+            current_version(),
+            conf_version
+        );
     }
 
     #[test]
