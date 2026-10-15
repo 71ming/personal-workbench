@@ -27,6 +27,7 @@ pub mod import;
 pub mod open;
 pub mod update;
 
+use std::io::Write;
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -66,7 +67,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init());
 
-    builder
+    let app = builder
         .setup(|app| {
             // 这里面任何一步失败都要走 report_failure()，**不能只用 `?` 往上抛**。
             //
@@ -100,8 +101,97 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Tauri 运行期异常（不是启动失败——启动失败已在上面处理并退出）");
+        .build(tauri::generate_context!())
+        .expect("Tauri 构建失败");
+
+    // 窗口导航**必须放在 Ready 事件里，不能放在 setup 里**。
+    //
+    // ⚠️ 这不是风格问题，是真机踩出来的：Android 上放在 setup 里导航**静默无效**。
+    //
+    // 现象：手机上界面能渲染出来（HTML 是从 APK 里的 tauri:// 协议读的），
+    // 但所有 /api/ 请求全挂，提示「连不上工作台服务」。
+    // 用 `adb shell cat /proc/net/tcp` 抓过铁证：8787 端口只有一条 LISTEN，
+    // **一条连接记录都没有** —— WebView 从头到尾没碰过我们这个服务。
+    //
+    // 原因链条：
+    //   1. wry 在 Android 上调 load_url 是这么写的（src/android/mod.rs）：
+    //        MainPipe::send(self.activity_id, WebViewMessage::LoadUrl(...));
+    //        Ok(())
+    //      **不管消息有没有送到，最后都返回 Ok()** —— 失败被吞掉了。
+    //   2. setup 是被 Tauri 在 Ready 事件里调用的（app.rs:1442-1448），
+    //      此刻事件循环刚起来、WebView 那条主线程消息通道还没就绪，
+    //      导航消息发出去石沉大海，而 navigate() 照样返回成功。
+    //
+    // Ready 回调是在 setup 跑完之后紧接着触发的，这时窗口和消息通道都就绪了。
+    //
+    // 桌面端原来在 setup 里导航是能用的（窗口先于 setup 创建、通道也早就绪），
+    // 现在统一挪到这里，**一条代码路径覆盖三端**，不用写平台分支。
+    app.run(|app, event| {
+        if let tauri::RunEvent::Ready = event {
+            navigate_to_server(app);
+        }
+    });
+}
+
+/// 把窗口导航到本地 HTTP 服务。
+///
+/// 地址是 setup 阶段定下来的（`http_server::serve` 返回的实际端口），
+/// 通过 managed state 传进来 —— setup 和 Ready 是两次不同的调用，闭包参数不共享。
+fn navigate_to_server(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ServerUrl>() else {
+        log_line(app, "Ready 到了但没有服务地址，setup 应该失败了？");
+        return;
+    };
+    let url = state.0.clone();
+
+    let Some(window) = app.get_webview_window("main") else {
+        // 桌面端从来没走到过这里。真走到说明 tauri.conf.json 里的窗口改名了，
+        // 或者被人删了 —— 属于「配置和代码对不上」，必须喊出来而不是默默不动。
+        log_line(app, "找不到名为 main 的窗口，导航跳过");
+        return;
+    };
+
+    match url.parse::<tauri::Url>() {
+        Ok(parsed) => match window.navigate(parsed) {
+            Ok(()) => log_line(app, &format!("已请求导航到 {}", url)),
+            Err(e) => log_line(app, &format!("导航失败：{}", e)),
+        },
+        Err(e) => log_line(app, &format!("地址解析失败 {}：{}", url, e)),
+    }
+}
+
+/// 启动过程中定下来的服务地址。
+struct ServerUrl(String);
+
+/// 往启动日志里追加一行。
+///
+/// 为什么需要它：桌面上出错了会弹错误说明、有控制台，
+/// **手机上这些全都没有**（report_failure 里开记事本那段是 `#[cfg(desktop)]`，
+/// 见那个函数的注释）。没有日志的话，手机上「起不来」就只是一个白屏，
+/// 排查只能靠猜。
+///
+/// 真出问题时用 `adb pull` 把它拉出来看。
+fn log_line(app: &tauri::AppHandle, message: &str) {
+    let Some(dir) = app.path().app_data_dir().ok() else {
+        return;
+    };
+    let path = dir.join("启动日志.log");
+    let line = format!("[{}] {}\n", chrono_now(), message);
+    // **新建文件时带 UTF-8 BOM**，跟 report_failure 里那个错误日志同一个理由：
+    // 记事本不认 UTF-8 就按系统 ANSI（中文 Windows 是 GBK）读，满屏乱码。
+    // 追加时不能重复写 BOM，只在「文件本来不存在」的那一刻写。
+    let is_new = !path.exists();
+    // 日志是给人看的，写不进去不该拦住程序跑。
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        if is_new {
+            let _ = f.write_all(&[0xEF, 0xBB, 0xBF]);
+        }
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// 真正的启动流程。抽出来是为了让「每一步出错都能被接住并报告」。
@@ -149,18 +239,13 @@ fn bootstrap(app: &tauri::App) -> Result<(), String> {
     // 只能在 Rust 侧调，详见 update.rs 顶部）。
     let port = http_server::serve(db_path, public_dir, Some(app.handle().clone()))?;
 
-    // ---- 5. 窗口指向真实地址 ----
+    // ---- 5. 把地址记下来，等窗口就绪了再导航 ----
     //
-    // tauri.conf.json 里没配 url（配了会被当成默认地址先加载一次，
-    // 然后我们再跳走，白白多一次失败请求）。
-    // 这里在运行时直接把窗口导航到实际端口。
+    // 这里**故意不导航**。原因写在 run() 里那段注释（真机踩出来的），
+    // 一句话版：setup 阶段 WebView 的消息通道还没就绪，导航会静默丢失。
     let url = format!("http://127.0.0.1:{}", port);
-    if let Some(window) = app.get_webview_window("main") {
-        let parsed = url.parse().map_err(|_| "地址格式不对".to_string())?;
-        window
-            .navigate(parsed)
-            .map_err(|e| format!("打开窗口失败：{}", e))?;
-    }
+    log_line(app.handle(), &format!("服务已启动：{}", url));
+    app.manage(ServerUrl(url));
 
     Ok(())
 }
